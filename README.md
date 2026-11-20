@@ -436,7 +436,7 @@ Adoraxe features a dedicated fail-closed administrator authentication system des
 
 ### Production YouTube Ingestion & Media Retrieval
 * **YouTube Metadata Provider (`YOUTUBE_PROVIDER="http"`)**: Render production uses the lightweight HTTP metadata scraper (`HttpScraperService`) to ingest live YouTube channel catalogs and video metadata without requiring Google YouTube Data API keys or browser automation overhead.
-* **Direct Media Retrieval (`YTDLP_ENABLED="true"`)**: Direct video stream extraction via `yt-dlp` is enabled in production. The backend Docker image (`backend/Dockerfile`) pre-installs both `ffmpeg` and `nodejs` (for `yt-dlp-ejs` JavaScript challenge execution), ensuring seamless downloading and 9:16 vertical transcoding on Render.
+* **Direct Media Retrieval (`YTDLP_ENABLED="true"`)**: Direct video stream extraction via `yt-dlp` is enabled in production. The backend Docker image (`backend/Dockerfile`) installs NodeSource Node.js 22.x (required by `yt-dlp >= 2026.10` for `yt-dlp-ejs` JavaScript challenge solving) and `ffmpeg`, ensuring seamless downloading and 9:16 vertical transcoding on Render.
 
 ### Automated Boot Migrations
 The production `backend/Dockerfile` executes `alembic upgrade head` automatically on container boot, meaning zero manual shell or pre-deploy commands are required on Render.

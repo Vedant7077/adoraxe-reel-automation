@@ -157,6 +157,9 @@ class YtDlpStatusResponse(BaseModel):
     ffprobe_available: bool
     ffprobe_path: Optional[str] = None
     js_runtime: Optional[str] = None
+    js_runtime_supported: bool = False
+    js_runtime_name: Optional[str] = None
+    js_runtime_version: Optional[str] = None
     max_file_size_mb: int = 2048
 
 

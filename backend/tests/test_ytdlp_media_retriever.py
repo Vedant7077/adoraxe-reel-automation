@@ -48,6 +48,7 @@ from app.services.youtube.ytdlp_media_retriever import (
     InvalidMediaError,
     FileSizeLimitExceededError,
     FormatUnavailableError,
+    JsRuntimeUnsupportedError,
 )
 from app.services.video.processor import VideoProcessor
 from app.schemas.schemas import ProcessVideoRequest
@@ -99,7 +100,7 @@ def test_get_js_runtime_info():
 
 
 def test_get_ytdlp_status_endpoint(client: TestClient):
-    """GET /api/v1/videos/ytdlp/status returns full capability payload."""
+    """GET /api/v1/videos/ytdlp/status returns full capability payload and no-cache headers."""
     response = client.get("/api/v1/videos/ytdlp/status")
     assert response.status_code == 200
     data = response.json()
@@ -108,6 +109,8 @@ def test_get_ytdlp_status_endpoint(client: TestClient):
     assert data["ffmpeg_available"] is True
     assert data["ffprobe_available"] is True
     assert data["max_file_size_mb"] == 2048
+    assert "js_runtime_supported" in data
+    assert "no-store" in response.headers.get("cache-control", "")
 
 
 # ─── 2. Strict Authorization Gate ────────────────────────────────────────────
@@ -463,6 +466,11 @@ def test_classify_download_errors():
     assert isinstance(err, FileSizeLimitExceededError)
     assert err.code == "FILE_SIZE_LIMIT_EXCEEDED"
 
+    # JS Runtime Unsupported
+    err = retriever._classify_download_error("ERROR: unsupported JavaScript runtime: Node.js 20.19.2 is unsupported")
+    assert isinstance(err, JsRuntimeUnsupportedError)
+    assert err.code == "JS_RUNTIME_UNSUPPORTED"
+
 
 # ─── 8. API HTTP Status Code Mappings ────────────────────────────────────────
 
@@ -471,6 +479,7 @@ def test_classify_download_errors():
     [
         (DownloadNotAuthorizedError("Not authorized"), 403, "DOWNLOAD_NOT_AUTHORIZED"),
         (YtDlpDisabledError("Disabled in config"), 400, "YTDLP_DISABLED"),
+        (JsRuntimeUnsupportedError("Node.js 22 required"), 422, "JS_RUNTIME_UNSUPPORTED"),
         (PrivateVideoError("Private video"), 403, "PRIVATE_VIDEO"),
         (BotChallengeError("Bot verification required"), 403, "BOT_CHALLENGE"),
         (AccessRestrictedError("HTTP 403 Forbidden"), 403, "ACCESS_RESTRICTED"),

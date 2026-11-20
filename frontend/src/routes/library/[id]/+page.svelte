@@ -767,7 +767,9 @@
                     <span>•</span>
                     <span>EJS {ytdlpStatus?.ytdlp_ejs_version || '0.8.0'}</span>
                     <span>•</span>
-                    <span>{ytdlpStatus?.js_runtime || 'Node.js'}</span>
+                    <span class={ytdlpStatus?.js_runtime_supported === false ? 'text-amber-400 font-medium' : 'text-zinc-300'}>
+                      {ytdlpStatus?.js_runtime || 'Node.js'}
+                    </span>
                     <span>•</span>
                     <span>FFmpeg {ytdlpStatus?.ffmpeg_available ? '✓' : '✗'}</span>
                   </div>
@@ -775,6 +777,10 @@
                   {#if !ytdlpStatus?.enabled}
                     <div class="p-2.5 rounded bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] leading-tight">
                       ⚠️ <strong>yt-dlp Retrieval Disabled:</strong> Set <code>YTDLP_ENABLED=true</code> in your environment configuration to activate direct stream retrieval.
+                    </div>
+                  {:else if ytdlpStatus?.js_runtime_supported === false}
+                    <div class="p-2.5 rounded bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] leading-tight">
+                      ⚠️ <strong>Unsupported JavaScript Runtime:</strong> yt-dlp requires Node.js v22 or newer (detected: <code>{ytdlpStatus?.js_runtime || 'unsupported'}</code>). Ensure the backend container is running the updated Dockerfile.
                     </div>
                   {/if}
 

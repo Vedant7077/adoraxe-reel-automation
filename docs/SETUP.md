@@ -283,7 +283,7 @@ Because Render Free does not offer interactive shell access or pre-deploy comman
    * `CLOUDINARY_API_KEY=your_api_key`
    * `CLOUDINARY_API_SECRET=your_api_secret`
    * `YOUTUBE_PROVIDER=http` (production HTTP metadata scraping)
-   * `YTDLP_ENABLED=true` (enables direct creator video stream extraction)
+   * `YTDLP_ENABLED=true` (enables direct creator video stream extraction with Node.js 22+ challenge solving)
 5. Click **Deploy Web Service**.
 
 ### 9.4 Frontend Deployment (Vercel)

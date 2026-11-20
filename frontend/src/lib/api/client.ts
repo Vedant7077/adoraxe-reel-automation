@@ -162,7 +162,7 @@ export const retrieveMedia = (
   });
 };
 
-export const getYtDlpStatus = () => request<any>('/videos/ytdlp/status');
+export const getYtDlpStatus = () => request<any>(`/videos/ytdlp/status?_t=${Date.now()}`);
 
 export const processVideo = (videoId: string, cropMode: 'blur' | 'pad' | 'crop' = 'blur') =>
   request<any>(`/videos/${videoId}/process`, {

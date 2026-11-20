@@ -101,18 +101,32 @@ class FileSizeLimitExceededError(YtDlpRetrievalError):
         super().__init__(message, code="FILE_SIZE_LIMIT_EXCEEDED")
 
 
+class JsRuntimeUnsupportedError(YtDlpRetrievalError):
+    def __init__(self, message: str):
+        super().__init__(message, code="JS_RUNTIME_UNSUPPORTED")
+
+
 # ─── Runtime Dependency Inspection ───────────────────────────────────────────
 
-def get_js_runtime_info() -> Optional[str]:
-    """Inspect and return available JavaScript runtime as detected by yt-dlp (Node.js or Deno)."""
+def get_js_runtime_details() -> Dict[str, Any]:
+    """Inspect and return structured JavaScript runtime info as detected by yt-dlp."""
     try:
-        from yt_dlp.utils._jsruntime import NodeJsRuntime, DenoJsRuntime, BunJsRuntime
-        for runtime_cls in (NodeJsRuntime, DenoJsRuntime, BunJsRuntime):
-            rt = runtime_cls()
-            info = rt.info
-            if info:
-                status_str = "supported" if info.supported else "unsupported"
-                return f"{info.name} v{info.version} ({status_str})"
+        from yt_dlp.utils._jsruntime import NodeJsRuntime, DenoJsRuntime, BunJsRuntime, QuickJsRuntime
+        for runtime_cls in (NodeJsRuntime, DenoJsRuntime, BunJsRuntime, QuickJsRuntime):
+            try:
+                rt = runtime_cls()
+                info = rt.info
+                if info:
+                    status_str = "supported" if info.supported else "unsupported"
+                    return {
+                        "name": info.name,
+                        "version": info.version,
+                        "supported": bool(info.supported),
+                        "path": info.path,
+                        "summary": f"{info.name} v{info.version} ({status_str})",
+                    }
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -120,11 +134,56 @@ def get_js_runtime_info() -> Optional[str]:
     if node_path:
         try:
             res = subprocess.run([node_path, "-v"], capture_output=True, text=True, timeout=5)
-            return f"node ({res.stdout.strip()})"
+            ver = res.stdout.strip()
+            major = 0
+            if ver.startswith("v"):
+                try:
+                    major = int(ver[1:].split(".")[0])
+                except Exception:
+                    pass
+            is_supported = major >= 22
+            status_str = "supported" if is_supported else "unsupported"
+            return {
+                "name": "node",
+                "version": ver.lstrip("v"),
+                "supported": is_supported,
+                "path": node_path,
+                "summary": f"node {ver} ({status_str})",
+            }
         except Exception:
-            return "node"
+            return {
+                "name": "node",
+                "version": "unknown",
+                "supported": False,
+                "path": node_path,
+                "summary": "node (unknown)",
+            }
 
-    return None
+    return {
+        "name": None,
+        "version": None,
+        "supported": False,
+        "path": None,
+        "summary": None,
+    }
+
+
+def get_js_runtime_info() -> Optional[str]:
+    """Inspect and return available JavaScript runtime as detected by yt-dlp (Node.js or Deno)."""
+    details = get_js_runtime_details()
+    return details.get("summary")
+
+
+def get_configured_js_runtimes() -> Dict[str, Dict[str, Any]]:
+    """Build dictionary of available JavaScript runtimes for yt-dlp's js_runtimes option."""
+    runtimes: Dict[str, Dict[str, Any]] = {}
+    if shutil.which("node"):
+        runtimes["node"] = {}
+    if shutil.which("deno"):
+        runtimes["deno"] = {}
+    if shutil.which("bun"):
+        runtimes["bun"] = {}
+    return runtimes or {"node": {}}
 
 
 def check_runtime_dependencies() -> Dict[str, Any]:
@@ -155,6 +214,7 @@ def check_runtime_dependencies() -> Dict[str, Any]:
 
     ffmpeg_bin = shutil.which("ffmpeg") or (FFMPEG_PATH if os.path.exists(FFMPEG_PATH) else None)
     ffprobe_bin = shutil.which("ffprobe") or (FFPROBE_PATH if os.path.exists(FFPROBE_PATH) else None)
+    js_details = get_js_runtime_details()
 
     return {
         "enabled": getattr(settings, "ytdlp_enabled", False),
@@ -166,7 +226,10 @@ def check_runtime_dependencies() -> Dict[str, Any]:
         "ffmpeg_path": ffmpeg_bin,
         "ffprobe_available": bool(ffprobe_bin),
         "ffprobe_path": ffprobe_bin,
-        "js_runtime": get_js_runtime_info(),
+        "js_runtime": js_details.get("summary"),
+        "js_runtime_name": js_details.get("name"),
+        "js_runtime_version": js_details.get("version"),
+        "js_runtime_supported": js_details.get("supported", False),
         "max_file_size_mb": getattr(settings, "ytdlp_max_file_size_mb", 2048),
     }
 
@@ -242,6 +305,11 @@ class YtDlpMediaRetriever:
     def _classify_download_error(self, err_msg: str) -> YtDlpRetrievalError:
         """Map raw yt-dlp error string to specific error categories without bypass."""
         lower = err_msg.lower()
+
+        if "unsupported javascript runtime" in lower or "unsupported js runtime" in lower or "javascript runtime is required" in lower:
+            return JsRuntimeUnsupportedError(
+                "yt-dlp requires a supported JavaScript runtime (Node.js >= 22.0.0 or Deno >= 2.3.0) to solve YouTube challenges. Please ensure Node.js 22+ is installed in the container environment."
+            )
 
         if "private video" in lower or "this video is private" in lower:
             return PrivateVideoError("This video is private. Accessing private videos without owner authorization is restricted.")
@@ -384,12 +452,12 @@ class YtDlpMediaRetriever:
             "nocheckcertificate": False,
             "noplaylist": True,
             "overwrites": False,  # Never overwrite unrelated existing files
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
             # No cookies, no bypass flags, no proxy
         }
-        if shutil.which("node"):
-            ydl_opts["js_runtimes"] = {"node": {}}
-        elif shutil.which("deno"):
-            ydl_opts["js_runtimes"] = {"deno": {}}
+        configured_runtimes = get_configured_js_runtimes()
+        if configured_runtimes:
+            ydl_opts["js_runtimes"] = configured_runtimes
 
         # Step 6: Execute download in thread pool
         await asyncio.to_thread(self._run_ytdlp_download, url, ydl_opts)

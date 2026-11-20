@@ -5,7 +5,7 @@ import os
 import uuid
 from datetime import datetime
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, status, Response
 from starlette.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -49,6 +49,7 @@ from app.services.youtube.ytdlp_media_retriever import (
     FFmpegMissingError,
     InvalidMediaError,
     FileSizeLimitExceededError,
+    JsRuntimeUnsupportedError,
 )
 from app.services.video.security import SecuritySSRFError
 from app.core.config import settings
@@ -191,8 +192,10 @@ async def list_videos(
 
 
 @router.get("/ytdlp/status", response_model=YtDlpStatusResponse)
-async def get_ytdlp_status():
+async def get_ytdlp_status(response: Response):
     """Get runtime status, dependency health, and capabilities for yt-dlp media retrieval."""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
     deps = check_runtime_dependencies()
     return YtDlpStatusResponse(
         enabled=deps["enabled"],
@@ -205,6 +208,9 @@ async def get_ytdlp_status():
         ffprobe_available=deps["ffprobe_available"],
         ffprobe_path=deps["ffprobe_path"],
         js_runtime=deps["js_runtime"],
+        js_runtime_supported=deps.get("js_runtime_supported", False),
+        js_runtime_name=deps.get("js_runtime_name"),
+        js_runtime_version=deps.get("js_runtime_version"),
         max_file_size_mb=deps["max_file_size_mb"],
     )
 
@@ -492,6 +498,15 @@ async def retrieve_media(
                     "code": e.code,
                     "message": str(e),
                     "action": "Enable yt-dlp by setting YTDLP_ENABLED=true in your environment configuration.",
+                }
+            )
+        except JsRuntimeUnsupportedError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "code": e.code,
+                    "message": str(e),
+                    "action": "Ensure the container environment runs a supported Node.js version (v22 or newer) for yt-dlp challenge solving.",
                 }
             )
         except VideoUnavailableError as e:

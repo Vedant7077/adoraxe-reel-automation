@@ -4,13 +4,19 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8000
 
-# Install system dependencies: FFmpeg, FFprobe, Node.js (for yt-dlp-ejs), and build headers
+# Install system dependencies: curl, ca-certificates, gnupg, NodeSource Node.js 22.x, FFmpeg, FFprobe, and build headers
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
+    curl \
+    ca-certificates \
+    gnupg \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
     nodejs \
+    ffmpeg \
     libpq-dev \
     gcc \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
