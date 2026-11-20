@@ -84,6 +84,8 @@ docker run -d \
    TOKEN_ENCRYPTION_KEY=your_generated_fernet_key
    DATABASE_URL=postgresql+psycopg2://adoraxe_user:adoraxe_pass_2026@localhost:5432/adoraxe_db
    DEMO_MODE=true
+   YOUTUBE_PROVIDER=http
+   YTDLP_ENABLED=true
    ```
 
 ---
@@ -280,6 +282,8 @@ Because Render Free does not offer interactive shell access or pre-deploy comman
    * `CLOUDINARY_CLOUD_NAME=your_cloud_name`
    * `CLOUDINARY_API_KEY=your_api_key`
    * `CLOUDINARY_API_SECRET=your_api_secret`
+   * `YOUTUBE_PROVIDER=http` (production HTTP metadata scraping)
+   * `YTDLP_ENABLED=true` (enables direct creator video stream extraction)
 5. Click **Deploy Web Service**.
 
 ### 9.4 Frontend Deployment (Vercel)

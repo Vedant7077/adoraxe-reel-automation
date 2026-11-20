@@ -434,6 +434,10 @@ Adoraxe features a dedicated fail-closed administrator authentication system des
 * **Fail-Closed Gate**: If `AUTH_ENABLED=true` (or running in production on Render), but `ADMIN_API_KEY` is missing or under 16 characters, the backend aborts startup immediately to prevent unauthenticated public exposure.
 * **Local Development**: Unauthenticated local development is preserved via `AUTH_ENABLED=false` (default) without altering local configurations.
 
+### Production YouTube Ingestion & Media Retrieval
+* **YouTube Metadata Provider (`YOUTUBE_PROVIDER="http"`)**: Render production uses the lightweight HTTP metadata scraper (`HttpScraperService`) to ingest live YouTube channel catalogs and video metadata without requiring Google YouTube Data API keys or browser automation overhead.
+* **Direct Media Retrieval (`YTDLP_ENABLED="true"`)**: Direct video stream extraction via `yt-dlp` is enabled in production. The backend Docker image (`backend/Dockerfile`) pre-installs both `ffmpeg` and `nodejs` (for `yt-dlp-ejs` JavaScript challenge execution), ensuring seamless downloading and 9:16 vertical transcoding on Render.
+
 ### Automated Boot Migrations
 The production `backend/Dockerfile` executes `alembic upgrade head` automatically on container boot, meaning zero manual shell or pre-deploy commands are required on Render.
 

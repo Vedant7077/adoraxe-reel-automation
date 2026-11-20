@@ -45,5 +45,7 @@ services:
         sync: false
       - key: CLOUDINARY_API_SECRET
         sync: false
+      - key: YOUTUBE_PROVIDER
+        value: "http"
       - key: YTDLP_ENABLED
-        value: "false"
+        value: "true"
