@@ -1,0 +1,49 @@
+# Render Blueprint Specification for Adoraxe Backend
+# Configures a Docker Web Service with hosted database integration (Neon / PostgreSQL)
+# and zero reliance on paid features (no shell or pre-deploy command required).
+
+services:
+  - type: web
+    name: adoraxe-backend
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    plan: free
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: DEMO_MODE
+        value: "true"
+      - key: AUTH_ENABLED
+        value: "true"
+      - key: ADMIN_API_KEY
+        sync: false  # Required: 32+ character random secret for single-owner dashboard authentication
+      - key: FORWARDED_ALLOW_IPS
+        value: "10.0.0.0/8,127.0.0.1"
+      - key: DATABASE_URL
+        sync: false  # Paste your hosted PostgreSQL URL (e.g. Neon, Supabase, or AWS RDS with ?sslmode=require)
+      - key: FRONTEND_URL
+        sync: false  # Paste your Vercel deployment URL (e.g. https://your-project.vercel.app)
+      - key: ALLOWED_ORIGINS
+        sync: false  # Paste your Vercel URL and any custom domains
+      - key: SECRET_KEY
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false  # 32-character url-safe base64 Fernet encryption key
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: META_CONFIG_ID
+        sync: false
+      - key: META_REDIRECT_URI
+        sync: false  # https://<your-render-backend-url>/api/v1/instagram/callback
+      - key: META_API_VERSION
+        value: "v26.0"
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: YTDLP_ENABLED
+        value: "false"
