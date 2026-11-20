@@ -10,7 +10,7 @@ from starlette.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models.models import Video, VideoAsset, VideoStatus
+from app.models.models import Video, VideoAsset, VideoStatus, JobStatus
 from app.schemas.schemas import (
     VideoResponse,
     VideoListResponse,
@@ -199,6 +199,20 @@ def _build_video_response(video: Video) -> VideoResponse:
         if not orig_url:
             orig_url = f"/api/v1/videos/{video.id}/stream/original"
 
+    # Identify any active in-flight processing job for this video
+    active_job_id: Optional[str] = None
+    is_proc_job = False
+    if hasattr(video, "publishing_jobs") and video.publishing_jobs:
+        active_proc_jobs = [
+            j for j in video.publishing_jobs
+            if j.instagram_account_id is None
+            and str(j.status) in (JobStatus.PENDING.value, JobStatus.PROCESSING.value, "PENDING", "PROCESSING")
+        ]
+        if active_proc_jobs:
+            latest_proc = sorted(active_proc_jobs, key=lambda j: j.updated_at or datetime.min, reverse=True)[0]
+            active_job_id = latest_proc.id
+            is_proc_job = True
+
     return VideoResponse(
         id=video.id,
         youtube_video_id=video.youtube_video_id,
@@ -217,6 +231,8 @@ def _build_video_response(video: Video) -> VideoResponse:
         original_video_url=orig_url,
         processed_video_url=proc_url,
         active_asset=active_asset_resp,
+        active_job_id=active_job_id,
+        is_processing=is_proc_job,
         uploaded_at=video.uploaded_at,
         created_at=video.created_at,
     )
@@ -759,11 +775,21 @@ async def retrieve_media(
     job_id = None
     if request.auto_process:
         job_repo = JobRepository(db)
-        job = job_repo.create_processing_job(video_id=video_id)
-        job_id = job.id
-        processor = VideoProcessor()
-        process_opts = ProcessVideoRequest(crop_mode=request.crop_mode)
-        background_tasks.add_task(processor.process_video, job_id=job.id, video_id=video_id, options=process_opts)
+        existing_job = job_repo.get_active_processing_job(video_id)
+        if existing_job and not job_repo.is_processing_job_stale(existing_job):
+            job_id = existing_job.id
+        else:
+            if existing_job and job_repo.is_processing_job_stale(existing_job):
+                job_repo.update_status(
+                    existing_job.id,
+                    JobStatus.FAILED,
+                    error="Previous processing attempt timed out. Stale job expired.",
+                )
+            job = job_repo.create_processing_job(video_id=video_id)
+            job_id = job.id
+            processor = VideoProcessor()
+            process_opts = ProcessVideoRequest(crop_mode=request.crop_mode)
+            background_tasks.add_task(processor.process_video, job_id=job.id, video_id=video_id, options=process_opts)
 
     msg = "Media retrieved successfully and verified with FFprobe. Original video is now playable."
     if status_str == "REUSED":
@@ -798,13 +824,35 @@ async def process_video(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """Start FFmpeg processing for a video."""
+    """
+    Start FFmpeg processing for a video.
+    Enforces idempotency and concurrent processing limits to prevent duplicate background execution.
+    """
     repo = VideoRepository(db)
     video = repo.get_by_id(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
     job_repo = JobRepository(db)
+
+    # Idempotency guard: prevent duplicate concurrent processing jobs for the same video
+    existing_job = job_repo.get_active_processing_job(video_id)
+    if existing_job:
+        if job_repo.is_processing_job_stale(existing_job):
+            # Previous container session died or timed out; expire stale job
+            job_repo.update_status(
+                existing_job.id,
+                JobStatus.FAILED,
+                error="Previous processing attempt timed out or worker restarted. Stale job expired.",
+            )
+        else:
+            # Active in-flight processing job already exists; return existing job to avoid duplicate FFmpeg runs
+            return {
+                "job_id": existing_job.id,
+                "message": "Processing is already in progress for this video.",
+                "status": existing_job.status,
+            }
+
     job = job_repo.create_processing_job(video_id=video_id)
 
     processor = VideoProcessor()

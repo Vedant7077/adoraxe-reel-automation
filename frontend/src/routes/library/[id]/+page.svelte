@@ -42,6 +42,7 @@
   let jobId = $state<string | null>(null);
   let jobStatus = $state<any>(null);
   let polling = $state(false);
+  let processing = $state(false);
   let uploadInput = $state<HTMLInputElement>();
   let uploading = $state(false);
   let cropMode = $state<'blur' | 'pad' | 'crop'>('blur');
@@ -120,6 +121,13 @@
   async function loadVideo() {
     try {
       video = await getVideo(videoId);
+      // Restore active in-flight processing job across page navigation and refresh
+      if (video?.active_job_id && (video?.is_processing || video?.status === 'PROCESSING') && !polling) {
+        jobId = video.active_job_id;
+        polling = true;
+        processing = true;
+        pollJob();
+      }
     } catch (e: any) {
       error = e.message;
     } finally {
@@ -231,6 +239,8 @@
   }
 
   async function handleProcess() {
+    if (processing || polling) return;
+    processing = true;
     uploadErrorMsg = '';
     uploadSuccessMsg = '';
     retrievalErrorMsg = '';
@@ -242,6 +252,7 @@
       pollJob();
     } catch (e: any) {
       error = e.message;
+      processing = false;
     }
   }
 
@@ -251,6 +262,7 @@
       jobStatus = await getJobStatus(jobId);
       if (jobStatus.status === 'FINISHED' || jobStatus.status === 'FAILED') {
         polling = false;
+        processing = false;
         if (jobStatus.status === 'FINISHED') {
           processedVideoVersion = Date.now();
           await loadVideo();
@@ -264,6 +276,7 @@
       }
     } catch (e) {
       polling = false;
+      processing = false;
     }
   }
 
@@ -509,8 +522,12 @@
                     <h3 class="text-xs font-semibold text-white">Reel Not Generated Yet</h3>
                     <p class="text-[11px] text-zinc-500 mt-1 max-w-[180px]">Select crop mode and click "Process as Reel" to convert.</p>
                     {#if video.has_uploaded_video}
-                      <button class="btn-primary text-xs mt-3 flex items-center gap-1.5" onclick={handleProcess}>
-                        ⚡ Process Now
+                      <button
+                        class="btn-primary text-xs mt-3 flex items-center gap-1.5"
+                        onclick={handleProcess}
+                        disabled={polling || processing || !video.has_uploaded_video}
+                      >
+                        ⚡ {processing ? 'Starting...' : polling ? 'Processing...' : 'Process Now'}
                       </button>
                     {/if}
                   </div>
@@ -596,7 +613,13 @@
                   <h3 class="text-sm font-semibold text-white">Reel Not Generated</h3>
                   <p class="text-xs text-zinc-500 mt-1 max-w-xs">Convert this video into 9:16 format with FFmpeg to enable Reel playback.</p>
                   {#if video.has_uploaded_video}
-                    <button class="btn-primary text-xs mt-4" onclick={handleProcess}>⚡ Process as Reel</button>
+                    <button
+                      class="btn-primary text-xs mt-4"
+                      onclick={handleProcess}
+                      disabled={polling || processing || !video.has_uploaded_video}
+                    >
+                      ⚡ {processing ? 'Starting...' : polling ? 'Processing...' : 'Process as Reel'}
+                    </button>
                   {/if}
                 </div>
               {/if}
@@ -896,9 +919,9 @@
           <button
             class="btn-primary w-full text-sm py-2.5 flex items-center justify-center gap-2 shadow-lg"
             onclick={handleProcess}
-            disabled={polling || !video.has_uploaded_video}
+            disabled={polling || processing || !video.has_uploaded_video}
           >
-            <span>⚡</span> {polling ? 'Processing with FFmpeg…' : video.has_processed_reel ? 'Re-Process as 9:16 Reel' : 'Process as Reel (1080×1920)'}
+            <span>⚡</span> {processing ? 'Starting Conversion…' : polling ? 'Processing with FFmpeg…' : video.has_processed_reel ? 'Re-Process as 9:16 Reel' : 'Process as Reel (1080×1920)'}
           </button>
           {#if !video.has_uploaded_video}
             <p class="text-[11px] text-amber-500/80 text-center mt-1.5">Acquire or upload video media first to enable processing.</p>

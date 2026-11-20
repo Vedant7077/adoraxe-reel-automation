@@ -57,6 +57,7 @@ ALLOWED_TRANSITIONS = {
         JobStatus.PUBLISHED.value,
     },
     JobStatus.PROCESSING.value: {
+        JobStatus.PROCESSING.value,
         JobStatus.CONTAINER_CREATING.value,
         JobStatus.CONTAINER_PROCESSING.value,
         JobStatus.READY_TO_PUBLISH.value,
@@ -314,6 +315,39 @@ class JobRepository:
 
         return (False, "")
 
+    PROCESSING_LEASE_SECONDS = 600  # 10 minutes lease for video processing jobs
+
+    def get_active_processing_job(self, video_id: str) -> Optional[PublishingJob]:
+        """Retrieve active in-flight video conversion/processing job for a video."""
+        return (
+            self.db.query(PublishingJob)
+            .filter(
+                PublishingJob.video_id == video_id,
+                PublishingJob.instagram_account_id.is_(None),
+                PublishingJob.status.in_([
+                    JobStatus.PENDING.value,
+                    JobStatus.PROCESSING.value,
+                    "PENDING",
+                    "PROCESSING",
+                ]),
+            )
+            .order_by(PublishingJob.updated_at.desc(), PublishingJob.created_at.desc())
+            .first()
+        )
+
+    def is_processing_job_stale(self, job: PublishingJob, lease_seconds: Optional[int] = None) -> bool:
+        """Check if a processing job was abandoned (e.g. worker crashed or container restarted)."""
+        lease = lease_seconds or self.PROCESSING_LEASE_SECONDS
+        ref_time = job.updated_at or job.started_at or job.created_at
+        if not ref_time:
+            return False
+        from datetime import timezone
+        if ref_time.tzinfo is not None:
+            now = datetime.now(timezone.utc)
+        else:
+            now = datetime.utcnow()
+        return (now - ref_time) > timedelta(seconds=lease)
+
     def create_processing_job(self, video_id: str) -> PublishingJob:
         """Create a video conversion/processing job."""
         job = PublishingJob(
@@ -387,13 +421,14 @@ class JobRepository:
             )
             return
 
-        # Check allowed transitions if defined
-        allowed = ALLOWED_TRANSITIONS.get(current_status)
-        if allowed is not None and len(allowed) > 0 and target_status not in allowed:
-            logger.warning(
-                "Unusual state transition for job %s: %s -> %s",
-                job_id, current_status, target_status
-            )
+        # Check allowed transitions if defined (progress/stage updates in the same state are not state transitions)
+        if current_status != target_status:
+            allowed = ALLOWED_TRANSITIONS.get(current_status)
+            if allowed is not None and len(allowed) > 0 and target_status not in allowed:
+                logger.warning(
+                    "Unusual state transition for job %s: %s -> %s",
+                    job_id, current_status, target_status
+                )
 
         job.status = target_status
         if current_stage:

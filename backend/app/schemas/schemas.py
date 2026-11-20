@@ -106,6 +106,8 @@ class VideoResponse(AdoraxeBaseModel):
     original_video_url: Optional[str] = None
     processed_video_url: Optional[str] = None
     active_asset: Optional[VideoAssetResponse] = None
+    active_job_id: Optional[str] = None
+    is_processing: bool = False
     uploaded_at: Optional[datetime] = None
     created_at: datetime
 

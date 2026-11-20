@@ -3,6 +3,7 @@ Video Processor – orchestrates FFmpeg processing + Cloudinary persistent stora
 Local disk is used only for temporary staging and conversion.
 """
 import os
+import asyncio
 import logging
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -16,6 +17,9 @@ from app.repositories.job_repository import JobRepository
 from app.models.models import VideoStatus, JobStatus
 
 logger = logging.getLogger(__name__)
+
+# Concurrency limiter: ensure at most 1 FFmpeg conversion runs at a time on limited-resource hosting
+_PROCESSING_SEMAPHORE = asyncio.Semaphore(1)
 
 
 class VideoProcessor:
@@ -169,11 +173,13 @@ class VideoProcessor:
             temp_files_to_clean.append(output_path)
 
             crop_mode_val = (options.crop_mode if options and options.crop_mode else "blur").lower().strip()
-            success, message = convert_to_reel(
-                input_path=input_path,
-                output_path=output_path,
-                crop_mode=crop_mode_val,
-            )
+            # Concurrency limit: Ensure at most 1 FFmpeg process executes at a time
+            async with _PROCESSING_SEMAPHORE:
+                success, message = convert_to_reel(
+                    input_path=input_path,
+                    output_path=output_path,
+                    crop_mode=crop_mode_val,
+                )
             if not success:
                 job_repo.update_status(job_id, JobStatus.FAILED, error=f"FFmpeg conversion failed: {message}")
                 return
