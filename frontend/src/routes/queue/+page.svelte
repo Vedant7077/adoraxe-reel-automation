@@ -9,6 +9,7 @@
     connectInstagram,
     removeFromQueue,
     addToQueue,
+    getVideoStreamUrl,
   } from '#lib/api/client';
   import { publishingStore } from '#lib/stores/publishing.svelte';
 
@@ -22,6 +23,18 @@
   let rightsConfirmed = $state(false);
   let publishError = $state('');
   let successNotice = $state('');
+
+  let queueVideoPlaybackUrl = $derived.by(() => {
+    if (!selectedVideo) return null;
+    const cld = selectedVideo.cloudinary_url;
+    if (cld && (cld.startsWith('https://') || cld.startsWith('http://'))) {
+      return cld;
+    }
+    if (selectedVideo.id) {
+      return getVideoStreamUrl(selectedVideo.id, 'processed');
+    }
+    return null;
+  });
 
   // Remove confirmation modal state
   let videoToRemove = $state<any>(null);
@@ -496,9 +509,9 @@
             <!-- 9:16 Vertical Video Player Container -->
             <div class="sm:col-span-5 flex justify-center">
               <div class="w-full max-w-[210px] rounded-2xl overflow-hidden aspect-[9/16] bg-black border-2 border-surface-border shadow-2xl relative ring-1 ring-white/10">
-                {#if selectedVideo.cloudinary_url}
+                {#if queueVideoPlaybackUrl}
                   <video
-                    src={selectedVideo.cloudinary_url}
+                    src={queueVideoPlaybackUrl}
                     controls
                     playsinline
                     preload="metadata"

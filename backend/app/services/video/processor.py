@@ -193,7 +193,7 @@ class VideoProcessor:
             reel_public_id = None
 
             if cdn.is_configured():
-                if staged_from_remote and (original_asset.cloudinary_url or remote_url):
+                if (staged_from_remote or original_asset.cloudinary_url) and (original_asset.cloudinary_url or remote_url):
                     # Original is already persistently stored on Cloudinary; reuse verified URL and public ID
                     orig_cloudinary_url = original_asset.cloudinary_url or remote_url
                     orig_public_id = original_asset.cloudinary_public_id or cdn.get_public_id(video_id, "original")

@@ -51,17 +51,35 @@
   let originalVideoVersion = $state(Date.now());
   let processedVideoVersion = $state(Date.now());
 
-  let originalVideoUrl = $derived(
-    video?.has_uploaded_video ? `${getVideoStreamUrl(videoId, 'original')}?t=${originalVideoVersion}` : null
-  );
-  let processedVideoUrl = $derived(
-    video?.has_processed_reel ? `${getVideoStreamUrl(videoId, 'processed')}?t=${processedVideoVersion}` : null
-  );
-  let activeAsset = $derived(
-    video?.active_asset || (video?.assets && video.assets.length > 0 ? video.assets[0] : null)
+  let originalAsset = $derived(
+    video?.assets?.find((a: any) => !a.is_processed) || null
   );
   let processedAsset = $derived(
     video?.assets?.find((a: any) => a.is_processed) || null
+  );
+
+  let originalVideoUrl = $derived.by(() => {
+    if (!video?.has_uploaded_video && !originalAsset) return null;
+    // Prefer direct verified Cloudinary HTTPS URL for HTML5 video playback without 401; fallback to local stream
+    const cld = originalAsset?.cloudinary_url || (video?.original_video_url?.startsWith('http') ? video.original_video_url : null);
+    if (cld && (cld.startsWith('https://') || cld.startsWith('http://'))) {
+      return cld;
+    }
+    return `${getVideoStreamUrl(videoId, 'original')}?t=${originalVideoVersion}`;
+  });
+
+  let processedVideoUrl = $derived.by(() => {
+    if (!video?.has_processed_reel && !processedAsset) return null;
+    // Prefer direct verified Cloudinary HTTPS URL for HTML5 video playback without 401; fallback to local stream
+    const cld = processedAsset?.cloudinary_url || (video?.processed_video_url?.startsWith('http') ? video.processed_video_url : null);
+    if (cld && (cld.startsWith('https://') || cld.startsWith('http://'))) {
+      return cld;
+    }
+    return `${getVideoStreamUrl(videoId, 'processed')}?t=${processedVideoVersion}`;
+  });
+
+  let activeAsset = $derived(
+    video?.active_asset || originalAsset || (video?.assets && video.assets.length > 0 ? video.assets[0] : null)
   );
   let processedCropMode = $derived(
     video?.crop_mode || processedAsset?.crop_mode || null

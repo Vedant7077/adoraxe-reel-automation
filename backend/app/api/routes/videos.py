@@ -26,6 +26,7 @@ from app.repositories.video_repository import VideoRepository
 from app.repositories.job_repository import JobRepository
 from app.services.video.processor import VideoProcessor
 from app.services.video.ffmpeg_service import probe_video
+from app.services.cloudinary.cloudinary_service import CloudinaryService
 from app.services.video.media_retrieval_service import (
     MediaRetrievalService,
     MediaRetrievalError,
@@ -91,31 +92,77 @@ def _build_video_response(video: Video) -> VideoResponse:
 
     sorted_assets = sorted(video.assets, key=lambda a: a.created_at or datetime.min, reverse=True)
 
+    # Distinctly identify latest original and processed assets
+    orig_asset = next((a for a in sorted_assets if not a.is_processed), None)
+    proc_asset = next((a for a in sorted_assets if a.is_processed), None)
+
+    # Fallback for legacy single-asset records where an asset with local file_path was marked processed
+    if not orig_asset:
+        orig_fallback = next(
+            (a for a in sorted_assets if a.file_path and os.path.exists(a.file_path) and os.path.isfile(a.file_path)),
+            None,
+        )
+        if orig_fallback:
+            orig_asset = orig_fallback
+
+    if not proc_asset:
+        proc_fallback = next((a for a in sorted_assets if _resolve_processed_path(a) is not None), None)
+        if proc_fallback:
+            proc_asset = proc_fallback
+
+    orig_has_cld = bool(
+        orig_asset
+        and not orig_asset.is_processed
+        and orig_asset.cloudinary_url
+        and (orig_asset.cloudinary_url.startswith("http://") or orig_asset.cloudinary_url.startswith("https://"))
+    )
+    orig_file_exists = bool(
+        orig_asset
+        and orig_asset.file_path
+        and os.path.exists(orig_asset.file_path)
+        and os.path.isfile(orig_asset.file_path)
+    )
+    if orig_has_cld or orig_file_exists:
+        has_uploaded = True
+        # Prefer direct verified Cloudinary HTTPS URL for HTML5 playback without 401; fallback to local API stream
+        orig_url = orig_asset.cloudinary_url if orig_has_cld else f"/api/v1/videos/{video.id}/stream/original"
+
+    proc_has_cld = bool(
+        proc_asset
+        and proc_asset.cloudinary_url
+        and (proc_asset.cloudinary_url.startswith("http://") or proc_asset.cloudinary_url.startswith("https://"))
+    )
+    proc_file_exists = bool(proc_asset and _resolve_processed_path(proc_asset))
+    if proc_has_cld or proc_file_exists:
+        has_processed = True
+        # Prefer direct verified Cloudinary HTTPS URL for HTML5 playback without 401; fallback to local API stream
+        proc_url = proc_asset.cloudinary_url if proc_has_cld else f"/api/v1/videos/{video.id}/stream/processed"
+        if proc_asset and proc_asset.crop_mode:
+            proc_crop_mode = proc_asset.crop_mode
+
     for asset in sorted_assets:
-        if asset.is_processed and asset.crop_mode and not proc_crop_mode:
-            proc_crop_mode = asset.crop_mode
+        is_orig = not asset.is_processed
+        asset_has_cld = bool(
+            asset.cloudinary_url
+            and (asset.cloudinary_url.startswith("http://") or asset.cloudinary_url.startswith("https://"))
+        )
         orig_exists = bool(
             (asset.file_path and os.path.exists(asset.file_path) and os.path.isfile(asset.file_path))
-            or (asset.cloudinary_url and (asset.cloudinary_url.startswith("http://") or asset.cloudinary_url.startswith("https://")) and not asset.is_processed)
+            or (asset_has_cld and is_orig)
+        )
+        proc_exists = bool(
+            (asset_has_cld and asset.is_processed)
+            or (_resolve_processed_path(asset) is not None)
         )
 
-        proc_exists = False
-        if asset.cloudinary_url and (asset.cloudinary_url.startswith("http://") or asset.cloudinary_url.startswith("https://")):
-            proc_exists = True
-        else:
-            proc_path = _resolve_processed_path(asset)
-            if proc_path:
-                proc_exists = True
-
-        orig_stream = f"/api/v1/videos/{video.id}/stream/original" if orig_exists else None
-        proc_stream = f"/api/v1/videos/{video.id}/stream/processed" if proc_exists else None
-
-        if orig_exists and not orig_url:
-            has_uploaded = True
-            orig_url = orig_stream
-        if proc_exists and not proc_url:
-            has_processed = True
-            proc_url = proc_stream
+        orig_stream = (
+            asset.cloudinary_url if (asset_has_cld and is_orig)
+            else (f"/api/v1/videos/{video.id}/stream/original" if orig_exists else None)
+        )
+        proc_stream = (
+            asset.cloudinary_url if (asset_has_cld and asset.is_processed)
+            else (f"/api/v1/videos/{video.id}/stream/processed" if proc_exists else None)
+        )
 
         resp_asset = VideoAssetResponse(
             id=asset.id,
@@ -416,6 +463,14 @@ async def upload_video(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
+    # Step 3: Run FFprobe and validate that a playable video stream exists
+    probe = probe_video(file_path)
+    if not probe.is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid video file: {probe.error or 'No playable video stream detected'}. Please upload a valid MP4, MOV, AVI, or WebM video file.",
+        )
+
     repo = VideoRepository(db)
 
     # If no video_id provided, create a parent video record
@@ -431,24 +486,77 @@ async def upload_video(
         db.refresh(new_video)
         video_id = new_video.id
 
+    # Step 4: Upload original video to Cloudinary using existing CloudinaryService
+    cdn = CloudinaryService()
+    cld_url: Optional[str] = None
+    pub_id: Optional[str] = None
+
+    if cdn.is_configured():
+        # Check if an original asset for this video already has a verified Cloudinary URL
+        existing_orig = repo.get_original_asset(video_id)
+        if (
+            existing_orig
+            and existing_orig.cloudinary_url
+            and (existing_orig.cloudinary_url.startswith("http://") or existing_orig.cloudinary_url.startswith("https://"))
+        ):
+            cld_url = existing_orig.cloudinary_url
+            pub_id = existing_orig.cloudinary_public_id
+        else:
+            # Deterministic naming convention: adoraxe/originals/{video_id}
+            pub_id = cdn.get_public_id(video_id, asset_type="original")
+            try:
+                upload_result = await cdn.upload_video(
+                    file_path=file_path,
+                    public_id=pub_id,
+                    folder="adoraxe/originals",
+                    overwrite=True,
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"Cloudinary upload failed: Unable to store original video asset in persistent cloud storage ({type(e).__name__}).",
+                )
+
+            if not upload_result or not upload_result.get("secure_url"):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Cloudinary upload failed: Cloud storage did not return a valid secure URL for original video.",
+                )
+            cld_url = upload_result.get("secure_url")
+
+            # Step 5: Verify the returned HTTPS URL, content type, and byte-range availability
+            is_verified = await cdn.verify_url(cld_url)
+            if not is_verified:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Cloudinary delivery verification failed: Uploaded media URL is not accessible or failed byte-range delivery verification.",
+                )
+
+    # Step 6: Persist the Cloudinary secure URL and public ID on the original VideoAsset record
     asset = repo.create_asset(video_id=video_id, file_path=file_path, original_filename=file.filename)
+    asset.duration_seconds = int(probe.duration_seconds)
+    asset.width = probe.width
+    asset.height = probe.height
+    asset.codec = probe.codec
+    asset.file_size_bytes = probe.file_size_bytes
+    asset.cloudinary_url = cld_url
+    asset.cloudinary_public_id = pub_id
+    asset.is_processed = False
 
-    # Probe immediately to extract metadata
-    try:
-        probe = probe_video(file_path)
-        if probe.is_valid:
-            repo.update_asset_metadata(
-                asset_id=asset.id,
-                duration=int(probe.duration_seconds),
-                width=probe.width,
-                height=probe.height,
-                codec=probe.codec,
-                file_size=probe.file_size_bytes,
-            )
-    except Exception:
-        pass
+    video = repo.get_by_id(video_id)
+    if video and video.status == VideoStatus.FAILED:
+        video.status = VideoStatus.IMPORTED
 
-    return VideoUploadResponse(id=asset.id, video_id=video_id, message="Upload successful. Ready to process.")
+    db.commit()
+    db.refresh(asset)
+
+    # Step 7: Only return upload success after Cloudinary verification and database persistence succeed
+    # Local temporary copy is retained until video processing has completed successfully
+    return VideoUploadResponse(
+        id=asset.id,
+        video_id=video_id,
+        message="Upload successful and persisted to permanent storage. Ready to process.",
+    )
 
 
 @router.post("/{video_id}/retrieve-media", response_model=MediaRetrieveResponse)
