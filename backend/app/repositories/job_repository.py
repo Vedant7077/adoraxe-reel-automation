@@ -373,8 +373,31 @@ class JobRepository:
         """Create and persist a publishing job before any outbound requests."""
         if idempotency_key:
             existing = self.get_by_idempotency_key(idempotency_key)
-            if existing and str(existing.status) in ACTIVE_STATUS_VALUES:
-                return existing
+            if existing:
+                if str(existing.status) in ACTIVE_STATUS_VALUES:
+                    return existing
+                if str(existing.status) in (JobStatus.PUBLISHED.value, JobStatus.SIMULATED.value, "PUBLISHED", "SIMULATED"):
+                    return existing
+                if str(existing.status) in (JobStatus.FAILED.value, "FAILED"):
+                    # Retry of previously failed job: reset and re-queue existing record
+                    existing.status = JobStatus.QUEUED.value
+                    existing.current_stage = "QUEUED"
+                    existing.processing_progress = 0
+                    existing.error_message = None
+                    existing.attempt_count = (existing.attempt_count or 1) + 1
+                    existing.instagram_container_id = None
+                    existing.instagram_media_id = None
+                    existing.permalink = None
+                    existing.started_at = None
+                    existing.completed_at = None
+                    existing.updated_at = datetime.utcnow()
+                    if cloudinary_url:
+                        existing.cloudinary_url = cloudinary_url
+                    if cloudinary_public_id:
+                        existing.cloudinary_public_id = cloudinary_public_id
+                    self.db.commit()
+                    self.db.refresh(existing)
+                    return existing
 
         initial_status = JobStatus.QUEUED.value
         job = PublishingJob(
@@ -391,10 +414,18 @@ class JobRepository:
             attempt_count=1,
             processing_progress=0,
         )
-        self.db.add(job)
-        self.db.commit()
-        self.db.refresh(job)
-        return job
+        try:
+            self.db.add(job)
+            self.db.commit()
+            self.db.refresh(job)
+            return job
+        except Exception as e:
+            self.db.rollback()
+            if idempotency_key:
+                existing = self.get_by_idempotency_key(idempotency_key)
+                if existing:
+                    return existing
+            raise e
 
     def update_status(
         self,

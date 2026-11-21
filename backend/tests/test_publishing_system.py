@@ -478,6 +478,20 @@ def test_15_concurrent_duplicate_publish_attempts(db_session, test_setup):
     )
     assert job2.id == job1.id
 
+    # If job fails, retrying with same idempotency key resets and re-queues without IntegrityError
+    repo.update_status(job1.id, JobStatus.FAILED.value, error="Timeout on Meta")
+    job3 = repo.create_publish_job(
+        video_id=test_setup["video"].id,
+        instagram_account_id=test_setup["account"].id,
+        caption="Concurrent Test",
+        is_demo=False,
+        idempotency_key="idemp_key_1",
+    )
+    assert job3.id == job1.id
+    assert job3.status == JobStatus.QUEUED.value
+    assert job3.error_message is None
+    assert job3.attempt_count == 2
+
 
 # 16. Backend restart and safe job recovery
 def test_16_backend_restart_and_safe_job_recovery(db_session, test_setup):

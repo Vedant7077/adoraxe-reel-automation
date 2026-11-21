@@ -311,15 +311,22 @@ async def publish_reel(
     caption_hash = hashlib.sha256(request.caption.encode("utf-8")).hexdigest()[:16]
     idempotency_key = f"pub_{account.id}_{request.video_id}_{caption_hash}"
 
-    job = job_repo.create_publish_job(
-        video_id=request.video_id,
-        instagram_account_id=account.id,
-        caption=request.caption,
-        is_demo=is_demo,
-        cloudinary_url=reel_cloudinary_url,
-        cloudinary_public_id=proc_asset.cloudinary_public_id if proc_asset else None,
-        idempotency_key=idempotency_key,
-    )
+    try:
+        job = job_repo.create_publish_job(
+            video_id=request.video_id,
+            instagram_account_id=account.id,
+            caption=request.caption,
+            is_demo=is_demo,
+            cloudinary_url=reel_cloudinary_url,
+            cloudinary_public_id=proc_asset.cloudinary_public_id if proc_asset else None,
+            idempotency_key=idempotency_key,
+        )
+    except Exception as e:
+        logger.exception("Failed to create or claim publish job: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to queue publish job: {e}"
+        )
 
     publisher = InstagramPublisher()
     background_tasks.add_task(
