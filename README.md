@@ -213,76 +213,49 @@ For complete workflow details, see [docs/PUBLISHING_WORKFLOW.md](file:///Users/s
 
 ## UI & Screenshots
 
-Adoraxe features a dark SaaS design system (inspired by Instagram tones and modern glass-morphism) developed using Stitch MCP.
+Adoraxe features a dark SaaS design system (inspired by Instagram tones and modern glass-morphism) developed using SvelteKit 2, Tailwind CSS, and custom glass-morphic components.
 
-### 1. Dashboard Overview
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ [A] Adoraxe                    Dashboard Overview                                      │
-│                                                                                        │
-│ [24 Imported Videos]   [8 Published Reels]   [3 Processing Jobs]   [0 Failed Jobs]    │
-│                                                                                        │
-│ ┌─ Quick Ingest YouTube URL ─────────────────────────────────────────────────────────┐ │
-│ │ https://youtube.com/@mkbhd                                     [ Fetch Videos ]    │ │
-│ └────────────────────────────────────────────────────────────────────────────────────┘ │
-│                                                                                        │
-│ Recent Activity:                                                                       │
-│ • The Future of Artificial Intelligence  [@yotube_insta_automation]  [✓ PUBLISHED]     │
-│ • Building with Gemini in Antigravity    [@adoraxe_demo]             [⏳ QUEUED]        │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-*(Screenshot placeholder: `docs/screenshots/dashboard.png`)*
+### 1. Dashboard & Publishing Activity Overview
+![Dashboard Overview](docs/screenshots/dashboard.jpg)
 
-### 2. Video Library & 9:16 Aspect Ratio Selector
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ Video Library (4 videos)                  [All] [Processed (2)] [Ready to Publish (1)] │
-│                                                                                        │
-│ ┌───────────────┐     ┌───────────────┐     ┌───────────────┐                          │
-│ │ 🎬 [Thumbnail]│     │ 🎬 [Thumbnail]│     │ 🎬 [Thumbnail]│                          │
-│ │ 1080x1920     │     │ 1920x1080     │     │ 1920x1080     │                          │
-│ │ Crop (Center) │     │ Pad (Bars)    │     │ Blur Fill     │                          │
-│ │ [✓ PROCESSED] │     │ [⏳ READY]    │     │ [ IMPORTED ]  │                          │
-│ └───────────────┘     └───────────────┘     └───────────────┘                          │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-*(Screenshot placeholder: `docs/screenshots/library.png`)*
+*Monitor active processing jobs, total imported videos, publication success rates, and live publishing history across connected accounts.*
 
-### 3. Publishing Queue with 9:16 Video Player Preview
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ Publishing Queue                                                                       │
-│ Select processed video, preview 9:16 Reel, choose target account, and publish.         │
-│                                                                                        │
-│ ┌─ Select Processed Video ─┐ ┌─ Target Profile ──────────────────────────────────────┐ │
-│ │ [✓] The Future of AI     │ │ 📸 @yotube_insta_automation (Creator)  [Switch Profile]│ │
-│ │     Crop (Center)  9:16  │ └───────────────────────────────────────────────────────┘ │
-│ │                          │ ┌─ 9:16 Reel Preview ────────┐ ┌─ Caption & Publishing ─┐ │
-│ │ [ ] Gemini Voice TTS     │ │ ┌────────────────────────┐ │ │ Write caption...       │ │
-│ │     Needs Cloudinary URL │ │ │      ▶ Play Reel       │ │ │ #AI #Tech #Innovation  │ │
-│ │                          │ │ │      (1080x1920)       │ │ │ 42/2200                │ │
-│ │                          │ │ └────────────────────────┘ │ │ [✓] Confirm Rights     │ │
-│ │                          │ │ [🗑 Remove from Queue]   │ │ [ Publish to Instagram ] │ │
-│ └──────────────────────────┘ └────────────────────────────┘ └────────────────────────┘ │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-*(Screenshot placeholder: `docs/screenshots/queue.png`)*
+---
 
-### 4. Instagram Connection Details Dashboard
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│ Instagram Connection Details                                                           │
-│ ┌─ Account Information ──────┐ ┌─ Token Health & Diagnostics ────────────────────────┐ │
-│ │ 📸 @yotube_insta_automation│ │ Token Validity: [✓ VALID]                           │ │
-│ │ Full Name: Vedant          │ │ Token Type: System-user access token (SUAT)         │ │
-│ │ Account Type: CREATOR      │ │ Expiration: Never (Non-expiring)                    │ │
-│ │ Instagram ID: 17841454...  │ │ Encryption: Fernet Symmetric AES-CBC-128            │ │
-│ │ Status: [● CONNECTED]      │ │ API Version: v26.0                                  │ │
-│ └────────────────────────────┘ └─────────────────────────────────────────────────────┘ │
-│ Granted Scopes: [instagram_basic] [instagram_content_publish] [public_profile]         │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
-*(Screenshot placeholder: `docs/screenshots/instagram.png`)*
+### 2. YouTube Channel Ingestion & Catalog
+![YouTube Channel Catalog](docs/screenshots/channels.jpg)
+
+*Ingest any public YouTube channel by handle or URL. Browse cataloged videos with view counts, durations, and one-click import into the automation pipeline.*
+
+---
+
+### 3. Video Library & Side-by-Side Comparison
+![Side-by-Side Video Comparison](docs/screenshots/library_comparison.jpg)
+
+*Inspect and compare original 16:9 source video alongside the transcoded 9:16 vertical Reel. Choose between **Blur Fill**, **Pad (Bars)**, or **Crop Center** modes with built-in yt-dlp media acquisition and ownership verification.*
+
+---
+
+### 4. Real-Time Conversion & Encoding Progress
+![Real-Time Encoding Progress](docs/screenshots/conversion_progress.jpg)
+
+*Live FFmpeg encoding telemetry streamed directly to the browser with percentage completion, elapsed vs. total timestamps, transcode speed, and automatic duration limiting to Meta's 15-minute maximum.*
+
+---
+
+### 5. Publishing Queue with 9:16 Reel Player & Caption Composer
+![Publishing Queue](docs/screenshots/publishing_queue.jpg)
+
+*Select ready Reels from the queue, preview in a vertical 9:16 HTML5 video player, compose rich captions with hashtags/emojis, verify Cloudinary HTTPS delivery, and dispatch directly to Instagram Creator profiles.*
+
+---
+
+### 6. Instagram Connection Details & Token Diagnostics
+![Instagram Account Diagnostics](docs/screenshots/instagram.jpg)
+
+*Verify Meta Unified Login connection health, System-User Access Token (SUAT) validity, non-expiring credentials, Fernet encryption state, and assigned Instagram Creator permissions.*
+
+---
 
 ---
 
