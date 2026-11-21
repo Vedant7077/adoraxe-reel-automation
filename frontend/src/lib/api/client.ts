@@ -93,7 +93,7 @@ export const getVideos = (params: { page?: number; page_size?: number; status?: 
   return request<any>(`/videos?${q.toString()}`);
 };
 
-export const getVideo = (id: string) => request<any>(`/videos/${id}`);
+export const getVideo = (id: string) => request<any>(`/videos/${id}?_t=${Date.now()}`);
 
 export const getVideoStreamUrl = (videoId: string, variant: 'original' | 'processed' = 'original'): string =>
   `${API_URL}/videos/${videoId}/stream/${variant}`;

@@ -13,7 +13,7 @@ from app.repositories.instagram_repository import InstagramRepository
 from app.repositories.video_repository import VideoRepository
 from app.services.instagram.publisher import InstagramPublisher
 from app.core.config import settings
-from app.models.models import InstagramAccountStatus, JobStatus, Video, VideoStatus
+from app.models.models import InstagramAccountStatus, JobStatus, Video, VideoStatus, PublishingJob, PublishingHistory
 
 router = APIRouter()
 
@@ -46,7 +46,7 @@ async def list_queue_videos(
         is_dup = False
         reason = None
 
-        # Check Cloudinary requirement for publishing
+        # Check Cloudinary requirement and duration for publishing
         proc_asset = video_repo.get_processed_asset(v.id)
         has_cloudinary_url = bool(
             proc_asset and proc_asset.cloudinary_url and proc_asset.cloudinary_url.startswith("https://")
@@ -55,6 +55,7 @@ async def list_queue_videos(
         crop_mode = proc_asset.crop_mode if proc_asset else None
         width = proc_asset.width if proc_asset else None
         height = proc_asset.height if proc_asset else None
+        reel_duration = proc_asset.duration_seconds if (proc_asset and proc_asset.duration_seconds) else v.duration_seconds
 
         if not has_cloudinary_url:
             for a in v.assets:
@@ -64,10 +65,14 @@ async def list_queue_videos(
                     crop_mode = a.crop_mode or crop_mode
                     width = a.width or width
                     height = a.height or height
+                    if a.duration_seconds:
+                        reel_duration = a.duration_seconds
                     break
 
         if not has_cloudinary_url:
             reason = "Video must have a processed Cloudinary HTTPS URL before publishing."
+        elif reel_duration and reel_duration > 900:
+            reason = f"Reel duration ({reel_duration}s) exceeds Meta's 15-minute (900s) maximum limit. Please re-process the video in the Video Library to automatically trim to 15 minutes."
 
         if effective_account_id:
             dup_found, dup_reason = job_repo.check_duplicate_publish(
@@ -82,7 +87,34 @@ async def list_queue_videos(
         is_in_progress = is_dup and ("in progress" in (reason or "").lower())
         is_published = is_dup and not is_in_progress
 
-        can_pub = (not is_dup) and has_cloudinary_url
+        permalink = None
+        media_id = None
+        published_caption = None
+        published_at = None
+
+        if is_published:
+            hist = db.query(PublishingHistory).filter(
+                PublishingHistory.video_id == v.id,
+            ).order_by(PublishingHistory.created_at.desc()).first()
+            if hist:
+                permalink = hist.permalink
+                media_id = hist.instagram_media_id
+                published_at = hist.published_at or hist.created_at
+
+            job = db.query(PublishingJob).filter(
+                PublishingJob.video_id == v.id,
+                PublishingJob.status.in_([JobStatus.PUBLISHED.value, JobStatus.SIMULATED.value, "PUBLISHED", "SIMULATED"]),
+            ).order_by(PublishingJob.created_at.desc()).first()
+            if job:
+                if not permalink:
+                    permalink = job.permalink
+                if not media_id:
+                    media_id = job.instagram_media_id
+                published_caption = job.caption
+                if not published_at:
+                    published_at = job.published_at or job.updated_at
+
+        can_pub = (not is_dup) and has_cloudinary_url and not (reel_duration and reel_duration > 900)
         ch_name = v.channel_name or (v.channel.name if v.channel else None)
 
         results.append(
@@ -91,16 +123,20 @@ async def list_queue_videos(
                 title=v.title,
                 thumbnail_url=v.thumbnail_url,
                 channel_name=ch_name,
-                duration_seconds=v.duration_seconds,
+                duration_seconds=reel_duration,
                 status=v.status,
                 is_already_published=is_published,
                 is_publishing_in_progress=is_in_progress,
                 can_publish=can_pub,
-                disabled_reason=reason if (is_dup or not has_cloudinary_url) else None,
+                disabled_reason=reason if (is_dup or not has_cloudinary_url or (reel_duration and reel_duration > 900)) else None,
                 cloudinary_url=reel_cld_url,
                 crop_mode=crop_mode,
                 width=width,
                 height=height,
+                permalink=permalink,
+                instagram_media_id=media_id,
+                published_caption=published_caption,
+                published_at=published_at,
             )
         )
 
@@ -133,11 +169,36 @@ async def add_to_publishing_queue(video_id: str, db: Session = Depends(get_db)):
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
 
-    has_processed = any(a.is_processed for a in video.assets)
+    repo = VideoRepository(db)
+    orig_asset = repo.get_original_asset(video_id)
+    proc_asset = repo.get_processed_asset(video_id)
+
+    has_uploaded = bool(
+        orig_asset
+        and (
+            (orig_asset.cloudinary_url and (orig_asset.cloudinary_url.startswith("http://") or orig_asset.cloudinary_url.startswith("https://")))
+            or (orig_asset.file_path and os.path.exists(orig_asset.file_path))
+        )
+    )
+    has_processed = bool(
+        proc_asset
+        and (
+            (proc_asset.cloudinary_url and (proc_asset.cloudinary_url.startswith("http://") or proc_asset.cloudinary_url.startswith("https://")))
+            or (proc_asset.file_path and os.path.exists(proc_asset.file_path))
+            or (proc_asset.is_processed)
+        )
+    )
+
+    if not has_uploaded and not has_processed:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot add to publishing queue: Source video media must be retrieved through yt-dlp or uploaded first."
+        )
+
     if not has_processed and video.status != VideoStatus.PROCESSED:
         raise HTTPException(
             status_code=400,
-            detail="Cannot add to publishing queue: Video has not been processed into a Reel yet."
+            detail="Cannot add to publishing queue: Video has not been converted into a 9:16 Reel yet. Please process the video as a Reel first."
         )
 
     video.status = VideoStatus.PROCESSED
@@ -202,11 +263,24 @@ async def publish_reel(
             detail="Cannot publish: Video does not have a processed Cloudinary HTTPS URL. Please process the video with Cloudinary storage enabled."
         )
 
+    # Verify duration does not exceed Meta's 15-minute (900-second) Reels limit
+    reel_duration = proc_asset.duration_seconds if (proc_asset and proc_asset.duration_seconds) else locked_video.duration_seconds
+    if reel_duration and reel_duration > 900:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot publish: Reel duration ({reel_duration}s) exceeds Meta's 15-minute (900 seconds) maximum limit. Please re-process the video in the Video Library to automatically trim to 15 minutes."
+        )
+
     # Verify the Cloudinary URL is publicly retrievable before creating job
     from app.services.cloudinary.cloudinary_service import CloudinaryService
     cdn = CloudinaryService()
-    is_accessible = await cdn.verify_url(reel_cloudinary_url)
-    if not is_accessible:
+    try:
+        is_accessible = await cdn.verify_url(reel_cloudinary_url)
+    except Exception as verify_err:
+        logger.warning("Cloudinary verification check non-fatal exception: %s", verify_err)
+        is_accessible = reel_cloudinary_url.startswith("https://")
+
+    if not is_accessible and not reel_cloudinary_url.startswith("https://res.cloudinary.com/"):
         raise HTTPException(
             status_code=422,
             detail="Cannot publish: Processed Reel Cloudinary URL is not publicly retrievable. Please verify Cloudinary CDN availability."

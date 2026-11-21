@@ -113,6 +113,9 @@ class PublishingStore {
           } else if (job.status === 'FAILED') {
             this.errorMessage = job.error_message || 'Publishing failed';
           }
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('adoraxe:job_finished', { detail: job }));
+          }
           return;
         }
 
@@ -137,10 +140,16 @@ class PublishingStore {
         this.successMessage = res.message;
         const updated = await getPublishJob(this.activeJob.id);
         this.activeJob = updated;
+        if (typeof window !== 'undefined' && updated) {
+          window.dispatchEvent(new CustomEvent('adoraxe:job_finished', { detail: updated }));
+        }
       } else {
         this.errorMessage = res.message;
         const updated = await getPublishJob(this.activeJob.id);
         this.activeJob = updated;
+        if (typeof window !== 'undefined' && updated) {
+          window.dispatchEvent(new CustomEvent('adoraxe:job_finished', { detail: updated }));
+        }
       }
     } catch (e: any) {
       this.errorMessage = `Reconciliation error: ${e.message || e}`;

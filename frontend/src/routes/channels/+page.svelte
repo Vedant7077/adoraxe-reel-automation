@@ -27,6 +27,10 @@
     loading = true;
     try {
       channels = await getChannels();
+      // Auto-load videos for the first channel if none is currently selected
+      if (channels.length > 0 && !selectedChannelId) {
+        await viewVideos(channels[0], false);
+      }
     } catch (e) {
       channels = [];
     } finally {
@@ -46,7 +50,7 @@
       await loadChannels();
       // Auto-load videos for the newly imported channel
       if (ch?.id) {
-        await viewVideos(ch);
+        await viewVideos(ch, true);
       }
     } catch (e: any) {
       importError = e.message || 'Failed to fetch channel';
@@ -55,7 +59,7 @@
     }
   }
 
-  async function viewVideos(channel: any) {
+  async function viewVideos(channel: any, shouldScroll = false) {
     selectedChannel = channel;
     selectedChannelId = channel.id;
     loadingVideos = true;
@@ -65,6 +69,11 @@
       const res = await getChannelVideos(channel.id);
       previewVideos = res.videos || [];
       videoTotal = res.total ?? previewVideos.length;
+      if (shouldScroll && typeof document !== 'undefined') {
+        setTimeout(() => {
+          document.getElementById('channel-videos-section')?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+      }
     } catch (e: any) {
       videoError = e.message || 'Failed to fetch channel videos';
       previewVideos = [];
@@ -193,7 +202,10 @@
   {/if}
 
   <!-- Connected Channels -->
-  <h2 class="text-sm font-semibold text-zinc-400 uppercase tracking-wide mb-3">Connected Channels</h2>
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold text-zinc-400 uppercase tracking-wide">Connected Channels</h2>
+    <a href="/library" class="text-xs text-primary hover:underline">Browse All Videos in Video Library →</a>
+  </div>
   {#if loading}
     <div class="space-y-3">
       {#each [1,2] as _}
@@ -209,7 +221,10 @@
   {:else}
     <div class="space-y-3 mb-8">
       {#each channels as channel}
-        <div class="card flex items-center gap-4 transition-all {selectedChannelId === channel.id ? 'border-primary/60 ring-1 ring-primary/40 bg-surface-elevated/40' : ''}">
+        <div
+          class="card flex items-center gap-4 transition-all cursor-pointer {selectedChannelId === channel.id ? 'border-primary/60 ring-1 ring-primary/40 bg-surface-elevated/40' : 'hover:border-zinc-700'}"
+          onclick={() => viewVideos(channel, true)}
+        >
           {#if channel.thumbnail_url}
             <img src={channel.thumbnail_url} alt={channel.name} class="w-12 h-12 rounded-full object-cover flex-shrink-0"/>
           {:else}
@@ -231,7 +246,7 @@
           <button
             class="btn-secondary text-xs"
             disabled={loadingVideos && selectedChannelId === channel.id}
-            onclick={() => viewVideos(channel)}
+            onclick={(e) => { e.stopPropagation(); viewVideos(channel, true); }}
           >
             {loadingVideos && selectedChannelId === channel.id
               ? '⏳ Loading…'
@@ -244,7 +259,7 @@
 
   <!-- Channel Videos Gallery Section -->
   {#if selectedChannel}
-    <div class="border-t border-surface-border pt-6 mt-6">
+    <div id="channel-videos-section" class="border-t border-surface-border pt-6 mt-6">
       <div class="flex items-center justify-between mb-4">
         <div>
           <h2 class="text-lg font-semibold text-white flex items-center gap-2">

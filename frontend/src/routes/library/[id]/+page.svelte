@@ -24,18 +24,13 @@
   let retrievalErrorAction = $state('');
   let lastErrorCode = $state('');
 
-  // Remote Media Retrieval State
-  let directMediaUrl = $state('');
-  let autoProcessOnRetrieve = $state(false);
-  let retrieving = $state(false);
-  let showUrlInput = $state(false);
-
   // yt-dlp Retrieval State
   let ytdlpStatus = $state<any>(null);
   let ytdlpRightsConfirmed = $state(false);
   let autoProcessOnYtDlp = $state(false);
   let retrievingYtDlp = $state(false);
-  let showYtDlpSection = $state(false);
+  let showYtDlpSection = $state(true);
+  let showReacquireOptions = $state(false);
   let retrievalStatus = $state<'IDLE' | 'DOWNLOAD_STARTED' | 'DOWNLOADED' | 'REUSED' | 'FAILED'>('IDLE');
 
   // Job & Upload State
@@ -70,7 +65,7 @@
   });
 
   let processedVideoUrl = $derived.by(() => {
-    if (!video?.has_processed_reel && !processedAsset) return null;
+    if (!video?.has_uploaded_video || (!video?.has_processed_reel && !processedAsset)) return null;
     // Prefer direct verified Cloudinary HTTPS URL for HTML5 video playback without 401; fallback to local stream
     const cld = processedAsset?.cloudinary_url || (video?.processed_video_url?.startsWith('http') ? video.processed_video_url : null);
     if (cld && (cld.startsWith('https://') || cld.startsWith('http://'))) {
@@ -78,6 +73,16 @@
     }
     return `${getVideoStreamUrl(videoId, 'processed')}?t=${processedVideoVersion}`;
   });
+
+  let canAddToQueue = $derived(
+    Boolean(
+      video?.has_uploaded_video &&
+      (video?.has_processed_reel || jobStatus?.status === 'FINISHED') &&
+      !processing &&
+      !polling &&
+      jobStatus?.status !== 'FAILED'
+    )
+  );
 
   let activeAsset = $derived(
     video?.active_asset || originalAsset || (video?.assets && video.assets.length > 0 ? video.assets[0] : null)
@@ -118,15 +123,39 @@
     await Promise.all([loadVideo(), loadYtDlpStatus()]);
   });
 
+  $effect(() => {
+    if (videoId) {
+      loadVideo();
+      loadYtDlpStatus();
+    }
+  });
+
   async function loadVideo() {
     try {
-      video = await getVideo(videoId);
+      const fetchedVideo = await getVideo(videoId);
+      if (fetchedVideo) {
+        // Defensive: If fetchedVideo says has_uploaded_video is false, BUT we already have an active local/retrieved asset, preserve it
+        if (!fetchedVideo.has_uploaded_video && video?.has_uploaded_video) {
+          fetchedVideo.has_uploaded_video = true;
+          if ((!fetchedVideo.assets || fetchedVideo.assets.length === 0) && video.assets?.length > 0) {
+            fetchedVideo.assets = video.assets;
+          }
+          if (!fetchedVideo.active_asset && video.active_asset) {
+            fetchedVideo.active_asset = video.active_asset;
+          }
+        }
+        video = fetchedVideo;
+        originalVideoVersion = Date.now();
+      }
       // Restore active in-flight processing job across page navigation and refresh
       if (video?.active_job_id && (video?.is_processing || video?.status === 'PROCESSING') && !polling) {
         jobId = video.active_job_id;
         polling = true;
         processing = true;
         pollJob();
+      } else if (!video?.active_job_id && video?.status !== 'PROCESSING') {
+        polling = false;
+        processing = false;
       }
     } catch (e: any) {
       error = e.message;
@@ -166,13 +195,57 @@
         autoProcess: autoProcessOnYtDlp,
         cropMode: cropMode,
       });
+
+      // 1. Immediately reset retrieving flag so button never stays stuck
+      retrievingYtDlp = false;
+
+      // 2. Set live retrieval status badge and success message
       retrievalStatus = res.status === 'REUSED' ? 'REUSED' : 'DOWNLOADED';
       retrievalSuccessMsg = `✓ [${retrievalStatus}] ${res.message} (${res.width || '—'}×${res.height || '—'}, ${formatDuration(res.duration_seconds)})`;
-      await loadVideo();
+
+      // 3. Immediately and reactively update video and asset state so preview renders instantly
+      const retrievedAsset = {
+        id: res.asset_id,
+        video_id: videoId,
+        original_filename: res.original_filename,
+        duration_seconds: res.duration_seconds,
+        width: res.width,
+        height: res.height,
+        codec: res.codec,
+        file_size_bytes: res.file_size_bytes,
+        is_processed: false,
+        is_reel_compatible: false,
+        cloudinary_url: null,
+      };
+
+      if (video) {
+        const remainingAssets = (video.assets || []).filter((a: any) => a.id !== res.asset_id && !a.is_processed);
+        const processedAssets = (video.assets || []).filter((a: any) => a.is_processed);
+        video = {
+          ...video,
+          has_uploaded_video: true,
+          status: video.status === 'FAILED' ? 'IMPORTED' : video.status,
+          duration_seconds: res.duration_seconds || video.duration_seconds,
+          original_video_url: res.original_stream_url || `/api/v1/videos/${videoId}/stream/original`,
+          assets: [retrievedAsset, ...remainingAssets, ...processedAssets],
+          active_asset: retrievedAsset,
+        };
+      }
+      originalVideoVersion = Date.now();
+
+      // 4. Kick off background Reel conversion job polling if autoProcess was selected
       if (res.job_id) {
         jobId = res.job_id;
         polling = true;
+        processing = true;
         pollJob();
+      }
+
+      // 5. Asynchronously reload complete video record from backend without blocking UI preview
+      try {
+        await loadVideo();
+      } catch (loadErr) {
+        console.warn('Could not reload full video state:', loadErr);
       }
     } catch (e: any) {
       retrievalStatus = 'FAILED';
@@ -181,39 +254,6 @@
       retrievalErrorAction = e.action || '';
     } finally {
       retrievingYtDlp = false;
-    }
-  }
-
-  async function handleRetrieveMedia() {
-    retrievalErrorMsg = '';
-    retrievalErrorAction = '';
-    lastErrorCode = '';
-    retrievalSuccessMsg = '';
-    uploadErrorMsg = '';
-    uploadSuccessMsg = '';
-    retrieving = true;
-    try {
-      const res = await retrieveMedia(
-        videoId,
-        directMediaUrl.trim() || undefined,
-        autoProcessOnRetrieve,
-        cropMode
-      );
-      retrievalSuccessMsg = `✓ ${res.message} (${res.width || '—'}×${res.height || '—'}, ${formatDuration(res.duration_seconds)})`;
-      directMediaUrl = '';
-      showUrlInput = false;
-      await loadVideo();
-      if (res.job_id) {
-        jobId = res.job_id;
-        polling = true;
-        pollJob();
-      }
-    } catch (e: any) {
-      lastErrorCode = e.code || 'FAILED';
-      retrievalErrorMsg = e.message || 'Media retrieval failed';
-      retrievalErrorAction = e.action || '';
-    } finally {
-      retrieving = false;
     }
   }
 
@@ -229,6 +269,13 @@
     try {
       await uploadVideo(file, videoId);
       uploadSuccessMsg = `✓ Successfully uploaded "${file.name}". Original preview is now playable.`;
+      if (video) {
+        video = {
+          ...video,
+          has_uploaded_video: true,
+        };
+      }
+      originalVideoVersion = Date.now();
       await loadVideo();
       input.value = '';
     } catch (e: any) {
@@ -241,19 +288,39 @@
   async function handleProcess() {
     if (processing || polling) return;
     processing = true;
+    polling = true;
     uploadErrorMsg = '';
     uploadSuccessMsg = '';
     retrievalErrorMsg = '';
     retrievalSuccessMsg = '';
+    // Show immediate progress bar & status so the user gets instant visual feedback
+    jobStatus = {
+      id: '',
+      status: 'PROCESSING',
+      current_stage: `Initializing 9:16 conversion (${formatCropModeLabel(cropMode)})…`,
+      progress: 5,
+    };
     try {
       const res = await processVideo(videoId, cropMode);
       jobId = res.job_id;
-      polling = true;
+      jobStatus = {
+        ...jobStatus,
+        id: res.job_id,
+      };
       pollJob();
     } catch (e: any) {
       error = e.message;
       processing = false;
+      polling = false;
+      jobStatus = null;
     }
+  }
+
+  function handleCancelReset() {
+    polling = false;
+    processing = false;
+    jobStatus = null;
+    loadVideo();
   }
 
   async function pollJob() {
@@ -266,17 +333,16 @@
         if (jobStatus.status === 'FINISHED') {
           processedVideoVersion = Date.now();
           await loadVideo();
-          uploadSuccessMsg = '✓ 9:16 Reel processed successfully! Processed video is now playable.';
+          uploadSuccessMsg = `✓ 9:16 Reel processed successfully with ${formatCropModeLabel(processedCropMode || cropMode)}! Playable in preview now.`;
         } else if (jobStatus.status === 'FAILED') {
           await loadVideo();
           uploadErrorMsg = `Processing failed: ${jobStatus.error_message || 'Unknown error'}`;
         }
       } else {
-        setTimeout(pollJob, 2000);
+        setTimeout(pollJob, 1000);
       }
     } catch (e) {
-      polling = false;
-      processing = false;
+      setTimeout(pollJob, 1500);
     }
   }
 
@@ -345,7 +411,7 @@
             {/if}
             <div class="pt-1.5 flex items-center justify-between border-t border-red-900/50">
               <p class="text-zinc-400 text-[11px]">
-                Fallback: Upload the video file directly or supply an authorized direct MP4/MOV URL.
+                Fallback: Upload the video file directly (MP4/MOV) or retrieve media via yt-dlp.
               </p>
               <button
                 type="button"
@@ -423,7 +489,8 @@
                       <video
                         controls
                         playsinline
-                        preload="metadata"
+                        preload="auto"
+                        poster={video.thumbnail_url || ''}
                         class="w-full h-full object-contain"
                         src={originalVideoUrl}
                       >
@@ -445,16 +512,10 @@
                   <div class="rounded-xl border-2 border-dashed border-surface-border bg-surface-elevated/40 p-6 flex flex-col items-center justify-center text-center aspect-video">
                     <span class="text-3xl mb-2">📁</span>
                     <h3 class="text-xs font-semibold text-white">Media Not Acquired Yet</h3>
-                    <p class="text-[11px] text-zinc-500 mt-1 max-w-[240px]">Acquire authorized media via yt-dlp stream, direct URL, or file upload in the pipeline panel.</p>
-                    <div class="flex flex-wrap gap-1.5 mt-3 justify-center">
-                      <button class="btn-primary text-xs py-1 px-2" onclick={() => showYtDlpSection = true}>
-                        ▶ yt-dlp
-                      </button>
-                      <button class="btn-secondary text-xs py-1 px-2" onclick={() => showUrlInput = true}>
-                        🌐 Direct URL
-                      </button>
-                      <button class="btn-secondary text-xs py-1 px-2" onclick={() => uploadInput?.click()}>
-                        📁 Upload
+                    <p class="text-[11px] text-zinc-500 mt-1 max-w-[240px]">Acquire media via yt-dlp retrieval or direct file upload in the pipeline panel.</p>
+                    <div class="flex flex-wrap gap-2 mt-3 justify-center">
+                      <button class="btn-secondary text-xs py-1 px-3 flex items-center gap-1" onclick={() => uploadInput?.click()}>
+                        <span>📁</span> Upload File
                       </button>
                     </div>
                   </div>
@@ -467,7 +528,11 @@
                   <span class="font-medium text-zinc-300 flex items-center gap-1.5">
                     <span>📱</span> Processed 9:16 Reel
                   </span>
-                  {#if video.has_processed_reel}
+                  {#if polling || processing}
+                    <span class="badge text-[10px] bg-blue-900/40 text-blue-300 border border-blue-700 animate-pulse font-mono">
+                      Encoding ({jobStatus?.progress ?? 5}%)
+                    </span>
+                  {:else if video.has_uploaded_video && video.has_processed_reel}
                     <div class="flex items-center gap-1.5">
                       {#if processedCropMode}
                         <span class="badge text-[10px] bg-primary/20 text-primary border border-primary/30 font-medium">
@@ -478,8 +543,6 @@
                         {processedAsset?.width && processedAsset?.height ? `${processedAsset.width}×${processedAsset.height}` : '1080×1920'}
                       </span>
                     </div>
-                  {:else if polling}
-                    <span class="badge text-[10px] bg-blue-900/40 text-blue-300 border border-blue-700 animate-pulse">Processing</span>
                   {:else}
                     <span class="badge text-[10px] bg-zinc-800 text-zinc-400">Not Generated</span>
                   {/if}
@@ -491,7 +554,8 @@
                       <video
                         controls
                         playsinline
-                        preload="metadata"
+                        preload="auto"
+                        poster={video.thumbnail_url || ''}
                         class="w-full h-full object-contain"
                         src={processedVideoUrl}
                       >
@@ -509,12 +573,27 @@
                       <span>H.264 / AAC</span>
                     </div>
                   </div>
-                {:else if polling}
-                  <div class="rounded-xl border border-primary/30 bg-surface-elevated/60 p-6 flex flex-col items-center justify-center text-center aspect-[9/16] max-h-[340px] mx-auto">
-                    <div class="w-8 h-8 rounded-full border-2 border-primary border-t-transparent animate-spin mb-3"></div>
-                    <h3 class="text-xs font-semibold text-white">Converting Reel...</h3>
-                    <p class="text-[11px] text-zinc-400 mt-1">Applying 9:16 crop with FFmpeg</p>
-                    <span class="text-xs font-mono text-primary mt-2">{jobStatus?.progress || 0}%</span>
+                {:else if polling || processing}
+                  <div class="rounded-xl border border-primary/40 bg-surface-elevated/80 p-5 flex flex-col items-center justify-center text-center aspect-[9/16] max-h-[340px] mx-auto space-y-2.5 shadow-inner">
+                    <div class="w-9 h-9 rounded-full border-2 border-primary border-t-transparent animate-spin"></div>
+                    <div class="space-y-1">
+                      <h3 class="text-xs font-semibold text-white">Converting to 9:16 Reel…</h3>
+                      <p class="text-[11px] text-zinc-400 font-mono line-clamp-2 max-w-[200px]">
+                        {jobStatus?.current_stage || `Applying ${formatCropModeLabel(cropMode)} with FFmpeg…`}
+                      </p>
+                    </div>
+                    <div class="w-full max-w-[180px] space-y-1 pt-1">
+                      <div class="flex justify-between text-[10px] text-zinc-400 font-mono">
+                        <span>Progress</span>
+                        <span class="text-primary font-bold">{jobStatus?.progress ?? 5}%</span>
+                      </div>
+                      <div class="h-1.5 bg-zinc-800 rounded-full overflow-hidden border border-zinc-700/40">
+                        <div
+                          class="h-full bg-gradient-to-r from-primary to-indigo-400 transition-all duration-300 rounded-full"
+                          style="width: {Math.max(5, Math.min(100, jobStatus?.progress ?? 5))}%"
+                        ></div>
+                      </div>
+                    </div>
                   </div>
                 {:else}
                   <div class="rounded-xl border-2 border-dashed border-surface-border bg-surface-elevated/40 p-6 flex flex-col items-center justify-center text-center aspect-[9/16] max-h-[340px] mx-auto">
@@ -550,7 +629,8 @@
                     <video
                       controls
                       playsinline
-                      preload="metadata"
+                      preload="auto"
+                      poster={video.thumbnail_url || ''}
                       class="w-full h-full object-contain"
                       src={originalVideoUrl}
                     >
@@ -564,11 +644,8 @@
                   <h3 class="text-sm font-semibold text-white">Original Video File Not Acquired</h3>
                   <p class="text-xs text-zinc-500 mt-1 max-w-sm">Retrieve authorized media or upload a video file in the pipeline panel to stream and preview.</p>
                   <div class="flex gap-3 mt-4">
-                    <button class="btn-primary text-xs flex items-center gap-1.5" onclick={() => showUrlInput = true}>
-                      🌐 Retrieve Remote Media
-                    </button>
                     <button class="btn-secondary text-xs flex items-center gap-2" onclick={() => uploadInput?.click()}>
-                      📁 Upload Video File
+                      <span>📁</span> Upload Video File
                     </button>
                   </div>
                 </div>
@@ -580,7 +657,11 @@
             <div class="space-y-3">
               <div class="flex items-center justify-between text-xs">
                 <span class="font-medium text-zinc-300">9:16 Vertical Instagram Reel</span>
-                {#if video.has_processed_reel}
+                {#if polling || processing}
+                  <span class="badge text-[10px] bg-blue-900/40 text-blue-300 border border-blue-700 animate-pulse font-mono">
+                    Encoding ({jobStatus?.progress ?? 5}%)
+                  </span>
+                {:else if video.has_uploaded_video && video.has_processed_reel}
                   <div class="flex items-center gap-1.5">
                     {#if processedCropMode}
                       <span class="badge text-[10px] bg-primary/20 text-primary border border-primary/30 font-medium">
@@ -599,13 +680,34 @@
                     <video
                       controls
                       playsinline
-                      preload="metadata"
+                      preload="auto"
+                      poster={video.thumbnail_url || ''}
                       class="w-full h-full object-contain"
                       src={processedVideoUrl}
                     >
                       <track kind="captions" />
                     </video>
                   {/key}
+                </div>
+              {:else if polling || processing}
+                <div class="rounded-2xl border-2 border-primary/40 bg-surface-elevated/70 p-8 flex flex-col items-center justify-center text-center aspect-[9/16] max-h-[460px] mx-auto space-y-3 shadow-xl">
+                  <div class="w-12 h-12 rounded-full border-3 border-primary border-t-transparent animate-spin"></div>
+                  <h3 class="text-sm font-semibold text-white">Converting to 9:16 Reel…</h3>
+                  <p class="text-xs text-zinc-400 font-mono max-w-xs">
+                    {jobStatus?.current_stage || `Encoding 1080×1920 Reel with ${formatCropModeLabel(cropMode)}…`}
+                  </p>
+                  <div class="w-full max-w-xs space-y-1.5 pt-2">
+                    <div class="flex justify-between text-xs text-zinc-400 font-mono">
+                      <span>Encoding Progress</span>
+                      <span class="text-primary font-bold">{jobStatus?.progress ?? 5}%</span>
+                    </div>
+                    <div class="h-2 bg-zinc-800 rounded-full overflow-hidden p-0.5 border border-zinc-700/40">
+                      <div
+                        class="h-full bg-gradient-to-r from-primary via-fuchsia-500 to-indigo-400 transition-all duration-300 rounded-full"
+                        style="width: {Math.max(5, Math.min(100, jobStatus?.progress ?? 5))}%"
+                      ></div>
+                    </div>
+                  </div>
                 </div>
               {:else}
                 <div class="rounded-2xl border-2 border-dashed border-surface-border bg-surface-elevated/40 p-10 flex flex-col items-center justify-center text-center aspect-[9/16] max-h-[460px] mx-auto">
@@ -640,7 +742,9 @@
             {:else}
               <span class="badge bg-amber-950/70 border border-amber-800/60 text-amber-300 text-xs">Media Required</span>
             {/if}
-            {#if video.has_processed_reel}
+            {#if processing || polling}
+              <span class="badge badge-processing animate-pulse font-mono text-xs">Encoding 9:16 Reel ({jobStatus?.progress ?? 5}%)</span>
+            {:else if video.has_uploaded_video && (video.has_processed_reel || jobStatus?.status === 'FINISHED')}
               <span class="badge badge-published">
                 9:16 Reel Ready {#if processedCropMode}• {formatCropModeLabel(processedCropMode)}{/if}
               </span>
@@ -705,182 +809,210 @@
             <div class="flex items-center justify-between">
               <p class="text-xs text-zinc-300 font-medium">1. Video Media Acquisition</p>
               {#if video.has_uploaded_video}
-                <span class="text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">Media Ready</span>
+                <span class="text-[10px] text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-800">✓ Media Ready</span>
               {:else}
                 <span class="text-[10px] text-amber-400 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800">Media Required</span>
               {/if}
             </div>
-            <p class="text-[11px] text-zinc-400 leading-relaxed">
-              Acquire authorized media to enable playback and 9:16 Reel conversion. Supports direct HTTP chunked streaming or manual upload.
-            </p>
 
-            <!-- Method A: Remote Direct Media URL -->
-            <div class="pt-1 border-t border-surface-border/60">
-              <div class="flex items-center justify-between mb-2">
-                <span class="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider">Method A: Authorized Remote URL</span>
-                <button
-                  class="text-[11px] text-primary hover:underline"
-                  onclick={() => showUrlInput = !showUrlInput}
-                >
-                  {showUrlInput ? 'Hide' : 'Enter URL →'}
-                </button>
+            {#if video.has_uploaded_video}
+              <!-- Confirmed Media Summary (Hide bulky acquisition form) -->
+              <div class="p-3 rounded-lg bg-emerald-950/30 border border-emerald-800/50 space-y-2 text-xs">
+                <div class="flex items-center justify-between">
+                  <span class="text-emerald-400 font-medium flex items-center gap-1.5">
+                    <span>✓</span> Source Media Active & Playable
+                  </span>
+                  <span class="text-[10px] bg-emerald-900/60 text-emerald-300 px-1.5 py-0.5 rounded font-mono">
+                    {activeAsset?.width && activeAsset?.height ? `${activeAsset.width}×${activeAsset.height}` : 'Playable'}
+                  </span>
+                </div>
+                {#if activeAsset?.original_filename}
+                  <p class="text-[11px] text-zinc-300 truncate font-mono">
+                    <span class="text-zinc-500">File:</span> {activeAsset.original_filename}
+                  </p>
+                {/if}
+                <div class="flex items-center gap-3 text-[11px] text-zinc-400">
+                  {#if video.duration_seconds || activeAsset?.duration_seconds}
+                    <span>⏱ {formatDuration(video.duration_seconds || activeAsset?.duration_seconds)}</span>
+                  {/if}
+                  {#if activeAsset?.file_size_bytes}
+                    <span>💾 {formatBytes(activeAsset.file_size_bytes)}</span>
+                  {/if}
+                  {#if activeAsset?.codec}
+                    <span>📼 {activeAsset.codec}</span>
+                  {/if}
+                </div>
               </div>
 
-              {#if showUrlInput}
-                <div class="space-y-2.5 p-3 rounded-lg bg-surface border border-surface-border/80 text-xs">
-                  <div>
-                    <label for="direct-media-input" class="block text-[11px] text-zinc-400 mb-1 font-medium">Direct MP4 / MOV URL</label>
-                    <input
-                      id="direct-media-input"
-                      type="url"
-                      bind:value={directMediaUrl}
-                      placeholder="https://storage.example.com/video.mp4"
-                      class="input text-xs w-full py-1.5"
-                      disabled={retrieving}
-                    />
+              <!-- Collapsible Options: Replace or Re-retrieve -->
+              <div class="pt-1 border-t border-surface-border/60">
+                <button
+                  type="button"
+                  class="text-[11px] text-zinc-400 hover:text-white flex items-center justify-between w-full py-1 transition-colors"
+                  onclick={() => showReacquireOptions = !showReacquireOptions}
+                >
+                  <span>Need to replace or re-download media?</span>
+                  <span class="text-primary font-medium">{showReacquireOptions ? 'Hide Replace Options ▴' : 'Replace Media ▾'}</span>
+                </button>
+
+                {#if showReacquireOptions}
+                  <div class="mt-2.5 space-y-3 pt-2 border-t border-surface-border/40 text-xs">
+                    <!-- Option 1: Re-retrieve from YouTube -->
+                    <div class="p-2.5 rounded bg-surface border border-surface-border space-y-2">
+                      <span class="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block">Re-retrieve via yt-dlp</span>
+                      <label class="flex items-start gap-2 cursor-pointer text-[11px] text-zinc-300 leading-snug">
+                        <input
+                          type="checkbox"
+                          bind:checked={ytdlpRightsConfirmed}
+                          class="rounded border-zinc-700 text-primary mt-0.5"
+                        />
+                        <span>I confirm authorization to re-download this video.</span>
+                      </label>
+                      <button
+                        class="btn-secondary text-xs w-full py-1.5 flex items-center justify-center gap-1.5"
+                        onclick={handleYtDlpRetrieve}
+                        disabled={retrievingYtDlp || !ytdlpRightsConfirmed || !ytdlpStatus?.enabled}
+                      >
+                        <span>▶</span>
+                        <span>{retrievingYtDlp ? 'Re-retrieving Stream…' : 'Re-retrieve YouTube Stream'}</span>
+                      </button>
+                    </div>
+
+                    <!-- Option 2: Replace with Local File -->
+                    <div class="p-2.5 rounded bg-surface border border-surface-border space-y-2">
+                      <span class="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block">Replace with Local File</span>
+                      <input type="file" accept="video/mp4,video/quicktime,video/webm" class="hidden" bind:this={uploadInput} onchange={handleUpload}/>
+                      <button
+                        class="btn-secondary text-xs w-full flex items-center justify-center gap-1.5 py-1.5"
+                        onclick={() => uploadInput?.click()}
+                        disabled={uploading}
+                      >
+                        <span>📁</span>
+                        <span>{uploading ? 'Uploading Video File...' : 'Upload Replacement File (MP4/MOV)'}</span>
+                      </button>
+                    </div>
                   </div>
-                  <label class="flex items-center gap-2 cursor-pointer text-[11px] text-zinc-300">
-                    <input type="checkbox" bind:checked={autoProcessOnRetrieve} class="rounded border-zinc-700 text-primary" />
-                    <span>Auto-convert to 9:16 Reel upon download</span>
-                  </label>
+                {/if}
+              </div>
+            {:else}
+              <p class="text-[11px] text-zinc-400 leading-relaxed">
+                Acquire media to enable playback and 9:16 Reel conversion. Retrieve directly from YouTube using yt-dlp or upload a video file manually.
+              </p>
+
+              <!-- Option 1: YouTube Media (yt-dlp) -->
+              <div class="pt-1 border-t border-surface-border/60">
+                <div class="flex items-center justify-between mb-2">
+                  <span class="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
+                    <span>Option 1: YouTube Media (yt-dlp)</span>
+                    {#if ytdlpStatus?.enabled}
+                      <span class="badge text-[9px] bg-emerald-950/60 text-emerald-400 border border-emerald-800">Enabled</span>
+                    {:else}
+                      <span class="badge text-[9px] bg-amber-950/60 text-amber-400 border border-amber-800">Disabled</span>
+                    {/if}
+                  </span>
                   <button
-                    class="btn-primary text-xs w-full py-2 flex items-center justify-center gap-2"
-                    onclick={handleRetrieveMedia}
-                    disabled={retrieving}
+                    class="text-[11px] text-primary hover:underline"
+                    onclick={() => showYtDlpSection = !showYtDlpSection}
                   >
-                    <span>🌐</span>
-                    <span>{retrieving ? 'Streaming Chunked Download…' : 'Retrieve Remote Media'}</span>
+                    {showYtDlpSection ? 'Hide' : 'Options →'}
                   </button>
-                  <p class="text-[10px] text-zinc-500 leading-tight">
-                    * YouTube watch URLs cannot be directly downloaded without bypassing access controls. Please supply an authorized direct MP4 stream or use file upload.
-                  </p>
                 </div>
-              {:else}
-                <button
-                  class="btn-secondary text-xs w-full py-1.5 flex items-center justify-center gap-1.5"
-                  onclick={() => showUrlInput = true}
-                >
-                  <span>🌐</span> Retrieve from Authorized URL
-                </button>
-              {/if}
-            </div>
 
-            <!-- Method B: Manual File Upload -->
-            <div class="pt-2 border-t border-surface-border/60">
-              <span class="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block mb-2">Method B: Manual File Upload</span>
-              <input type="file" accept="video/mp4,video/quicktime,video/webm" class="hidden" bind:this={uploadInput} onchange={handleUpload}/>
-              <button
-                class="btn-secondary text-xs w-full flex items-center justify-center gap-2 py-1.5"
-                onclick={() => uploadInput?.click()}
-                disabled={uploading}
-              >
-                <span>📁</span> {uploading ? 'Uploading Video File...' : video.has_uploaded_video ? 'Replace Video File' : 'Upload Video File (MP4/MOV)'}
-              </button>
-              {#if activeAsset?.original_filename}
-                <p class="text-[10px] text-zinc-400 truncate mt-1">Current asset: {activeAsset.original_filename}</p>
-              {/if}
-            </div>
+                {#if showYtDlpSection}
+                  <div class="space-y-2.5 p-3 rounded-lg bg-surface border border-surface-border/80 text-xs">
+                    <!-- System Status Pill -->
+                    <div class="flex flex-wrap items-center gap-1.5 text-[10px] text-zinc-400 p-2 rounded bg-surface-elevated/70 border border-surface-border/60">
+                      <span class="font-medium text-zinc-300">yt-dlp {ytdlpStatus?.ytdlp_version || '2026.10.26'}</span>
+                      <span>•</span>
+                      <span>EJS {ytdlpStatus?.ytdlp_ejs_version || '0.8.0'}</span>
+                      <span>•</span>
+                      <span class={ytdlpStatus?.js_runtime_supported === false ? 'text-amber-400 font-medium' : 'text-zinc-300'}>
+                        {ytdlpStatus?.js_runtime || 'Node.js'}
+                      </span>
+                      <span>•</span>
+                      <span>FFmpeg {ytdlpStatus?.ffmpeg_available ? '✓' : '✗'}</span>
+                    </div>
 
-            <!-- Method C: Authorized YouTube Media Retrieval (yt-dlp) -->
-            <div class="pt-2 border-t border-surface-border/60">
-              <div class="flex items-center justify-between mb-2">
-                <span class="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider flex items-center gap-1.5">
-                  <span>Method C: YouTube Media (yt-dlp)</span>
-                  {#if ytdlpStatus?.enabled}
-                    <span class="badge text-[9px] bg-emerald-950/60 text-emerald-400 border border-emerald-800">Enabled</span>
-                  {:else}
-                    <span class="badge text-[9px] bg-amber-950/60 text-amber-400 border border-amber-800">Disabled</span>
-                  {/if}
-                </span>
-                <button
-                  class="text-[11px] text-primary hover:underline"
-                  onclick={() => showYtDlpSection = !showYtDlpSection}
-                >
-                  {showYtDlpSection ? 'Hide' : 'Options →'}
-                </button>
+                    {#if !ytdlpStatus?.enabled}
+                      <div class="p-2.5 rounded bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] leading-tight">
+                        ⚠️ <strong>yt-dlp Retrieval Disabled:</strong> Set <code>YTDLP_ENABLED=true</code> in your environment configuration to activate direct stream retrieval.
+                      </div>
+                    {:else if ytdlpStatus?.js_runtime_supported === false}
+                      <div class="p-2.5 rounded bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] leading-tight">
+                        ⚠️ <strong>Unsupported JavaScript Runtime:</strong> yt-dlp requires Node.js v22 or newer (detected: <code>{ytdlpStatus?.js_runtime || 'unsupported'}</code>). Ensure the backend container is running the updated Dockerfile.
+                      </div>
+                    {/if}
+
+                    <!-- Live Retrieval Status Badge -->
+                    {#if retrievalStatus !== 'IDLE'}
+                      <div class="flex items-center justify-between p-2 rounded bg-surface-elevated text-xs border border-surface-border">
+                        <span class="text-zinc-400">Status:</span>
+                        {#if retrievalStatus === 'DOWNLOAD_STARTED'}
+                          <span class="badge text-[10px] bg-blue-900/60 text-blue-300 border border-blue-700 animate-pulse font-mono">DOWNLOAD_STARTED</span>
+                        {:else if retrievalStatus === 'DOWNLOADED'}
+                          <span class="badge text-[10px] bg-emerald-950/60 text-emerald-300 border border-emerald-800 font-mono">DOWNLOADED</span>
+                        {:else if retrievalStatus === 'REUSED'}
+                          <span class="badge text-[10px] bg-amber-950/60 text-amber-300 border border-amber-800 font-mono">REUSED</span>
+                        {:else if retrievalStatus === 'FAILED'}
+                          <span class="badge text-[10px] bg-red-950/60 text-red-300 border border-red-800 font-mono">FAILED</span>
+                        {/if}
+                      </div>
+                    {/if}
+
+                    <label class="flex items-start gap-2 cursor-pointer text-[11px] text-zinc-300 leading-snug">
+                      <input
+                        type="checkbox"
+                        bind:checked={ytdlpRightsConfirmed}
+                        class="rounded border-zinc-700 text-primary mt-0.5"
+                      />
+                      <span>I confirm content ownership or authorization to download and repurpose this video. <span class="text-amber-400 font-semibold">*Required</span></span>
+                    </label>
+
+                    <label class="flex items-center gap-2 cursor-pointer text-[11px] text-zinc-300">
+                      <input
+                        type="checkbox"
+                        bind:checked={autoProcessOnYtDlp}
+                        class="rounded border-zinc-700 text-primary"
+                      />
+                      <span>Auto-convert to 9:16 Reel upon download</span>
+                    </label>
+
+                    <button
+                      class="btn-primary text-xs w-full py-2 flex items-center justify-center gap-2"
+                      onclick={handleYtDlpRetrieve}
+                      disabled={retrievingYtDlp || !ytdlpRightsConfirmed || !ytdlpStatus?.enabled}
+                    >
+                      <span>▶</span>
+                      <span>{retrievingYtDlp ? 'Retrieving Stream via yt-dlp…' : 'Retrieve Authorized YouTube Media'}</span>
+                    </button>
+
+                    <p class="text-[10px] text-zinc-500 leading-tight">
+                      * Format: <code>bv*+ba/b</code> merged into MP4 via FFmpeg (max 2 GB). Strictly no cookies, no CAPTCHA bypass, no DRM circumvention.
+                    </p>
+                  </div>
+                {:else}
+                  <button
+                    class="btn-secondary text-xs w-full py-1.5 flex items-center justify-center gap-1.5"
+                    onclick={() => showYtDlpSection = true}
+                  >
+                    <span>▶</span> Retrieve via yt-dlp
+                  </button>
+                {/if}
               </div>
 
-              {#if showYtDlpSection}
-                <div class="space-y-2.5 p-3 rounded-lg bg-surface border border-surface-border/80 text-xs">
-                  <!-- System Status Pill -->
-                  <div class="flex flex-wrap items-center gap-1.5 text-[10px] text-zinc-400 p-2 rounded bg-surface-elevated/70 border border-surface-border/60">
-                    <span class="font-medium text-zinc-300">yt-dlp {ytdlpStatus?.ytdlp_version || '2026.10.26'}</span>
-                    <span>•</span>
-                    <span>EJS {ytdlpStatus?.ytdlp_ejs_version || '0.8.0'}</span>
-                    <span>•</span>
-                    <span class={ytdlpStatus?.js_runtime_supported === false ? 'text-amber-400 font-medium' : 'text-zinc-300'}>
-                      {ytdlpStatus?.js_runtime || 'Node.js'}
-                    </span>
-                    <span>•</span>
-                    <span>FFmpeg {ytdlpStatus?.ffmpeg_available ? '✓' : '✗'}</span>
-                  </div>
-
-                  {#if !ytdlpStatus?.enabled}
-                    <div class="p-2.5 rounded bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] leading-tight">
-                      ⚠️ <strong>yt-dlp Retrieval Disabled:</strong> Set <code>YTDLP_ENABLED=true</code> in your environment configuration to activate direct stream retrieval.
-                    </div>
-                  {:else if ytdlpStatus?.js_runtime_supported === false}
-                    <div class="p-2.5 rounded bg-amber-950/40 border border-amber-800/60 text-amber-300 text-[11px] leading-tight">
-                      ⚠️ <strong>Unsupported JavaScript Runtime:</strong> yt-dlp requires Node.js v22 or newer (detected: <code>{ytdlpStatus?.js_runtime || 'unsupported'}</code>). Ensure the backend container is running the updated Dockerfile.
-                    </div>
-                  {/if}
-
-                  <!-- Live Retrieval Status Badge -->
-                  {#if retrievalStatus !== 'IDLE'}
-                    <div class="flex items-center justify-between p-2 rounded bg-surface-elevated text-xs border border-surface-border">
-                      <span class="text-zinc-400">Status:</span>
-                      {#if retrievalStatus === 'DOWNLOAD_STARTED'}
-                        <span class="badge text-[10px] bg-blue-900/60 text-blue-300 border border-blue-700 animate-pulse font-mono">DOWNLOAD_STARTED</span>
-                      {:else if retrievalStatus === 'DOWNLOADED'}
-                        <span class="badge text-[10px] bg-emerald-950/60 text-emerald-300 border border-emerald-800 font-mono">DOWNLOADED</span>
-                      {:else if retrievalStatus === 'REUSED'}
-                        <span class="badge text-[10px] bg-amber-950/60 text-amber-300 border border-amber-800 font-mono">REUSED</span>
-                      {:else if retrievalStatus === 'FAILED'}
-                        <span class="badge text-[10px] bg-red-950/60 text-red-300 border border-red-800 font-mono">FAILED</span>
-                      {/if}
-                    </div>
-                  {/if}
-
-                  <label class="flex items-start gap-2 cursor-pointer text-[11px] text-zinc-300 leading-snug">
-                    <input
-                      type="checkbox"
-                      bind:checked={ytdlpRightsConfirmed}
-                      class="rounded border-zinc-700 text-primary mt-0.5"
-                    />
-                    <span>I confirm content ownership or authorization to download and repurpose this video. <span class="text-amber-400 font-semibold">*Required</span></span>
-                  </label>
-
-                  <label class="flex items-center gap-2 cursor-pointer text-[11px] text-zinc-300">
-                    <input
-                      type="checkbox"
-                      bind:checked={autoProcessOnYtDlp}
-                      class="rounded border-zinc-700 text-primary"
-                    />
-                    <span>Auto-convert to 9:16 Reel upon download</span>
-                  </label>
-
-                  <button
-                    class="btn-primary text-xs w-full py-2 flex items-center justify-center gap-2"
-                    onclick={handleYtDlpRetrieve}
-                    disabled={retrievingYtDlp || !ytdlpRightsConfirmed || !ytdlpStatus?.enabled}
-                  >
-                    <span>▶</span>
-                    <span>{retrievingYtDlp ? 'Retrieving Stream via yt-dlp…' : 'Retrieve Authorized YouTube Media'}</span>
-                  </button>
-
-                  <p class="text-[10px] text-zinc-500 leading-tight">
-                    * Format: <code>bv*+ba/b</code> merged into MP4 via FFmpeg (max 2 GB). Strictly no cookies, no CAPTCHA bypass, no DRM circumvention.
-                  </p>
-                </div>
-              {:else}
+              <!-- Option 2: Manual File Upload -->
+              <div class="pt-2 border-t border-surface-border/60">
+                <span class="text-[11px] font-semibold text-zinc-300 uppercase tracking-wider block mb-2">Option 2: Manual File Upload</span>
+                <input type="file" accept="video/mp4,video/quicktime,video/webm" class="hidden" bind:this={uploadInput} onchange={handleUpload}/>
                 <button
-                  class="btn-secondary text-xs w-full py-1.5 flex items-center justify-center gap-1.5"
-                  onclick={() => showYtDlpSection = true}
+                  class="btn-secondary text-xs w-full flex items-center justify-center gap-2 py-1.5"
+                  onclick={() => uploadInput?.click()}
+                  disabled={uploading}
                 >
-                  <span>▶</span> Retrieve via yt-dlp
+                  <span>📁</span> {uploading ? 'Uploading Video File...' : 'Upload Video File (MP4/MOV)'}
                 </button>
-              {/if}
-            </div>
+              </div>
+            {/if}
           </div>
 
           <!-- Step 2: Aspect Ratio & Conversion -->
@@ -917,42 +1049,116 @@
 
           <!-- Step 3: FFmpeg Action Button -->
           <button
-            class="btn-primary w-full text-sm py-2.5 flex items-center justify-center gap-2 shadow-lg"
+            class="btn-primary w-full text-sm py-2.5 flex items-center justify-center gap-2 shadow-lg transition-all"
             onclick={handleProcess}
             disabled={polling || processing || !video.has_uploaded_video}
           >
-            <span>⚡</span> {processing ? 'Starting Conversion…' : polling ? 'Processing with FFmpeg…' : video.has_processed_reel ? 'Re-Process as 9:16 Reel' : 'Process as Reel (1080×1920)'}
+            {#if processing || polling}
+              <span class="inline-block animate-spin text-sm">⚙️</span>
+              <span>Converting ({jobStatus?.progress ?? 5}%)…</span>
+            {:else if video.has_processed_reel}
+              <span>⚡</span> Re-Process as 9:16 Reel
+            {:else}
+              <span>⚡</span> Process as Reel (1080×1920)
+            {/if}
           </button>
           {#if !video.has_uploaded_video}
             <p class="text-[11px] text-amber-500/80 text-center mt-1.5">Acquire or upload video media first to enable processing.</p>
           {/if}
 
-          <!-- Job Progress Status -->
-          {#if jobStatus}
-            <div class="mt-4 p-3 rounded-lg bg-surface-elevated/70 border border-surface-border space-y-2">
-              <div class="flex justify-between text-xs">
-                <span class="text-zinc-400">Processing Progress</span>
-                <span class="text-white font-mono font-medium">{jobStatus.progress}%</span>
+          <!-- Live Conversion Progress Bar & Status -->
+          {#if jobStatus || processing || polling}
+            <div class="mt-4 p-3.5 rounded-lg bg-surface-elevated/90 border border-surface-border shadow-md space-y-2.5 transition-all">
+              <!-- Top Row: Stage Indicator & Percentage -->
+              <div class="flex items-center justify-between text-xs">
+                <div class="flex items-center gap-2 font-medium">
+                  {#if jobStatus?.status === 'FINISHED'}
+                    <span class="text-emerald-400 flex items-center gap-1.5 font-semibold">
+                      <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                      <span>Conversion Complete</span>
+                    </span>
+                  {:else if jobStatus?.status === 'FAILED'}
+                    <span class="text-red-400 flex items-center gap-1.5 font-semibold">
+                      <span class="w-2 h-2 rounded-full bg-red-400"></span>
+                      <span>Conversion Failed</span>
+                    </span>
+                  {:else}
+                    <span class="text-primary flex items-center gap-1.5 font-semibold">
+                      <span class="relative flex h-2 w-2">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+                      </span>
+                      <span>Converting Aspect Ratio</span>
+                    </span>
+                  {/if}
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <span class="text-xs font-mono font-bold {jobStatus?.status === 'FINISHED' ? 'text-emerald-400' : jobStatus?.status === 'FAILED' ? 'text-red-400' : 'text-primary'}">
+                    {jobStatus?.progress ?? (processing ? 5 : 0)}%
+                  </span>
+                </div>
               </div>
-              <div class="h-2 bg-surface-border rounded-full overflow-hidden">
-                <div class="h-full bg-gradient-to-r from-primary to-indigo-400 transition-all duration-500 rounded-full"
-                     style="width: {jobStatus.progress}%"></div>
+
+              <!-- Animated Progress Bar Track -->
+              <div class="h-2.5 bg-zinc-800/90 rounded-full overflow-hidden p-0.5 border border-zinc-700/60">
+                <div
+                  class="h-full rounded-full transition-all duration-300 ease-out {jobStatus?.status === 'FINISHED' ? 'bg-gradient-to-r from-emerald-500 to-teal-400' : jobStatus?.status === 'FAILED' ? 'bg-red-500' : 'bg-gradient-to-r from-primary via-fuchsia-500 to-indigo-400'}"
+                  style="width: {Math.max(5, Math.min(100, jobStatus?.progress ?? (processing ? 5 : 0)))}%"
+                ></div>
               </div>
-              <p class="text-xs text-center font-medium {jobStatus.status === 'FAILED' ? 'text-red-400' : jobStatus.status === 'FINISHED' ? 'text-emerald-400' : 'text-blue-400'}">
-                {#if jobStatus.status === 'FINISHED'}
-                  ✓ 100% Complete • Processed with {formatCropModeLabel(processedCropMode || cropMode)} (9:16)
-                {:else if jobStatus.status === 'FAILED'}
-                  FAILED – {jobStatus.error_message || 'Processing failed'}
+
+              <!-- Stage & Progress Details -->
+              <div class="text-[11px] leading-snug">
+                {#if jobStatus?.status === 'FINISHED'}
+                  <p class="text-emerald-300/90 font-medium">
+                    ✓ Successfully generated 1080×1920 Reel with {formatCropModeLabel(processedCropMode || cropMode)} format. Playable in preview now.
+                  </p>
+                {:else if jobStatus?.status === 'FAILED'}
+                  <div class="space-y-2">
+                    <p class="text-red-300 font-medium">
+                      {jobStatus?.error_message || 'Processing failed. Check source video specs.'}
+                    </p>
+                    <div class="flex items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        class="btn-primary text-xs py-1.5 px-3 flex items-center gap-1.5 font-medium"
+                        onclick={handleProcess}
+                      >
+                        <span>🔄</span> Retry Conversion
+                      </button>
+                      <button
+                        type="button"
+                        class="btn-secondary text-xs py-1.5 px-3"
+                        onclick={() => { jobStatus = null; }}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
                 {:else}
-                  Processing ({jobStatus.status}) – Converting to 9:16 with {formatCropModeLabel(cropMode)}…
+                  <div class="space-y-1">
+                    <p class="text-zinc-200 font-mono text-[11px] truncate">
+                      {jobStatus?.current_stage || `FFmpeg encoding with ${formatCropModeLabel(cropMode)}…`}
+                    </p>
+                    <div class="flex items-center justify-between text-[10px] text-zinc-500 pt-0.5">
+                      <span>Target: 1080×1920 (9:16) H.264 / AAC</span>
+                      <button
+                        type="button"
+                        class="text-zinc-400 hover:text-red-400 underline transition-colors cursor-pointer"
+                        onclick={handleCancelReset}
+                      >
+                        Cancel / Reset
+                      </button>
+                    </div>
+                  </div>
                 {/if}
-              </p>
+              </div>
             </div>
           {/if}
         </div>
 
         <!-- Add to Publishing Queue -->
-        {#if video.status === 'PROCESSED' || video.has_processed_reel || (jobStatus?.status === 'FINISHED')}
+        {#if canAddToQueue}
           <div class="card border-emerald-800/50 bg-emerald-950/20 p-5 space-y-3">
             <div class="flex items-center gap-2 text-emerald-400 text-xs font-semibold">
               <span>✓</span>

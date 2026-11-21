@@ -303,6 +303,10 @@ class QueueVideoItem(AdoraxeBaseModel):
     crop_mode: Optional[str] = None
     width: Optional[int] = None
     height: Optional[int] = None
+    permalink: Optional[str] = None
+    instagram_media_id: Optional[str] = None
+    published_caption: Optional[str] = None
+    published_at: Optional[datetime] = None
 
 
 # ─── History Schemas ──────────────────────────────────────────────────────────

@@ -72,6 +72,9 @@ def _resolve_processed_path(asset: VideoAsset) -> Optional[str]:
             if os.path.exists(candidate) and os.path.isfile(candidate):
                 return os.path.realpath(candidate)
     if asset.file_path:
+        if os.path.exists(asset.file_path) and os.path.isfile(asset.file_path):
+            if "_reel" in asset.file_path or asset.is_processed:
+                return os.path.realpath(asset.file_path)
         candidate = asset.file_path.replace(".mp4", "_reel.mp4").replace(".mov", "_reel.mp4")
         if not candidate.endswith("_reel.mp4"):
             candidate = asset.file_path + "_reel.mp4"
@@ -199,6 +202,12 @@ def _build_video_response(video: Video) -> VideoResponse:
         if not orig_url:
             orig_url = f"/api/v1/videos/{video.id}/stream/original"
 
+    # Strict integrity: Cannot have processed reel without acquired/retrieved source video media
+    if not has_uploaded:
+        has_processed = False
+        proc_url = None
+        proc_crop_mode = None
+
     # Identify any active in-flight processing job for this video
     active_job_id: Optional[str] = None
     is_proc_job = False
@@ -210,8 +219,12 @@ def _build_video_response(video: Video) -> VideoResponse:
         ]
         if active_proc_jobs:
             latest_proc = sorted(active_proc_jobs, key=lambda j: j.updated_at or datetime.min, reverse=True)[0]
-            active_job_id = latest_proc.id
-            is_proc_job = True
+            ref_time = latest_proc.updated_at or latest_proc.started_at or latest_proc.created_at
+            now = datetime.now(ref_time.tzinfo) if (ref_time and ref_time.tzinfo) else datetime.utcnow()
+            is_stale = bool(ref_time and (now - ref_time).total_seconds() > 180)
+            if not is_stale:
+                active_job_id = latest_proc.id
+                is_proc_job = True
 
     return VideoResponse(
         id=video.id,
@@ -279,12 +292,28 @@ async def get_ytdlp_status(response: Response):
 
 
 @router.get("/{video_id}", response_model=VideoResponse)
-async def get_video(video_id: str, db: Session = Depends(get_db)):
+async def get_video(video_id: str, response: Response, db: Session = Depends(get_db)):
     """Get a specific video by ID with full preview metadata."""
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     repo = VideoRepository(db)
     video = repo.get_by_id(video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
+
+    # Auto-expire any stale in-flight processing jobs for this video
+    job_repo = JobRepository(db)
+    active_job = job_repo.get_active_processing_job(video_id)
+    if active_job and job_repo.is_processing_job_stale(active_job, lease_seconds=180):
+        job_repo.update_status(
+            active_job.id,
+            JobStatus.FAILED,
+            error="Previous conversion attempt timed out or was interrupted. Please retry.",
+            current_stage="Timed Out / Interrupted",
+        )
+        db.refresh(video)
+
     return _build_video_response(video)
 
 
@@ -799,6 +828,8 @@ async def retrieve_media(
 
     orig_stream = f"/api/v1/videos/{video.id}/stream/original"
 
+    db.expire_all()
+
     return MediaRetrieveResponse(
         asset_id=asset.id,
         video_id=video.id,
@@ -862,10 +893,26 @@ async def process_video(
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
-async def get_job_status(job_id: str, db: Session = Depends(get_db)):
+async def get_job_status(job_id: str, response: Response, db: Session = Depends(get_db)):
     """Get processing job status."""
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    db.expire_all()
     repo = JobRepository(db)
     job = repo.get_by_id(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Auto-expire stale processing job so client never polls indefinitely
+    if str(job.status) in (JobStatus.PENDING.value, JobStatus.PROCESSING.value, "PENDING", "PROCESSING"):
+        if repo.is_processing_job_stale(job, lease_seconds=180):
+            repo.update_status(
+                job.id,
+                JobStatus.FAILED,
+                error="Conversion process timed out or was interrupted. Please retry.",
+                current_stage="Timed Out / Interrupted",
+            )
+            db.refresh(job)
+
     return job

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/state';
   import {
     getQueueVideos,
@@ -41,19 +41,40 @@
   let showRemoveModal = $state(false);
   let removing = $state(false);
 
+  const handleJobFinished = () => {
+    loadVideos(selectedAccountId);
+  };
+
   onMount(async () => {
-    await Promise.all([loadIgStatus(), loadVideos()]);
+    await loadIgStatus();
+    await loadVideos(selectedAccountId);
     // Recover any in-flight publishing job or caption from database
     await publishingStore.init(selectedAccountId);
     if (publishingStore.selectedVideoId) {
       const match = videos.find((v) => v.id === publishingStore.selectedVideoId);
       if (match) selectedVideo = match;
     }
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('adoraxe:job_finished', handleJobFinished);
+    }
+  });
+
+  onDestroy(() => {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('adoraxe:job_finished', handleJobFinished);
+    }
   });
 
   async function loadVideos(forAccountId?: string) {
     try {
       videos = await getQueueVideos(forAccountId || selectedAccountId);
+      if (selectedVideo) {
+        const fresh = videos.find((v) => v.id === selectedVideo.id);
+        if (fresh) {
+          selectedVideo = fresh;
+        }
+      }
       const targetId = page.url.searchParams.get('video_id');
       if (targetId) {
         let found = videos.find((v) => v.id === targetId);
@@ -167,7 +188,11 @@
       );
       await loadVideos();
     } catch (e: any) {
-      publishError = e.message || 'Publishing submission failed';
+      if (e?.message === 'Failed to fetch') {
+        publishError = 'Cannot connect to backend server (Failed to fetch). If the server was reloading, please try clicking publish again in a few seconds.';
+      } else {
+        publishError = e.message || 'Publishing submission failed';
+      }
     }
   }
 
@@ -228,7 +253,109 @@
   let isJobInFlight = $derived(
     activeJob ? ['QUEUED', 'CONTAINER_CREATING', 'CONTAINER_PROCESSING', 'READY_TO_PUBLISH', 'PUBLISH_REQUESTED', 'PENDING', 'PROCESSING'].includes(activeJob.status) : false
   );
-  let isPublished = $derived(activeJob?.status === 'PUBLISHED');
+  let isPublished = $derived(activeJob?.status === 'PUBLISHED' || activeJob?.status === 'SIMULATED');
+
+  function isVideoPublished(v: any): boolean {
+    if (!v) return false;
+    if (v.is_already_published) return true;
+    if (
+      activeJob &&
+      (activeJob.status === 'PUBLISHED' || activeJob.status === 'SIMULATED') &&
+      activeJob.video_id === v.id
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function isVideoInProgress(v: any): boolean {
+    if (!v) return false;
+    if (isVideoPublished(v)) return false;
+    if (v.is_publishing_in_progress) return true;
+    if (
+      activeJob &&
+      isJobInFlight &&
+      activeJob.video_id === v.id
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  $effect(() => {
+    if (activeJob && (activeJob.status === 'PUBLISHED' || activeJob.status === 'SIMULATED')) {
+      loadVideos(selectedAccountId);
+    }
+  });
+
+  function getReelUrl(v: any): string {
+    if (!v) return 'https://www.instagram.com';
+    if (activeJob && activeJob.video_id === v.id && activeJob.permalink) {
+      return activeJob.permalink;
+    }
+    if (v.permalink) {
+      return v.permalink;
+    }
+    const mediaId = (activeJob && activeJob.video_id === v.id && activeJob.instagram_media_id) || v.instagram_media_id;
+    if (mediaId) {
+      return `https://www.instagram.com/reel/${mediaId}/`;
+    }
+    const username = currentAccount?.username || igStatus?.username || 'yotube_insta_automation';
+    return `https://www.instagram.com/${username}/reels/`;
+  }
+
+  function getPublishedCaption(v: any): string {
+    if (!v) return '';
+    if (activeJob && activeJob.video_id === v.id && activeJob.caption) {
+      return activeJob.caption;
+    }
+    if (v.published_caption) {
+      return v.published_caption;
+    }
+    if (publishingStore.caption && isVideoPublished(v)) {
+      return publishingStore.caption;
+    }
+    return '';
+  }
+
+  function getPublishedDate(v: any): string | null {
+    if (!v) return null;
+    if (activeJob && activeJob.video_id === v.id && activeJob.published_at) {
+      return activeJob.published_at;
+    }
+    if (v.published_at) {
+      return v.published_at;
+    }
+    return null;
+  }
+
+  function getMediaId(v: any): string | null {
+    if (!v) return null;
+    if (activeJob && activeJob.video_id === v.id && activeJob.instagram_media_id) {
+      return activeJob.instagram_media_id;
+    }
+    if (v.instagram_media_id) {
+      return v.instagram_media_id;
+    }
+    return null;
+  }
+
+  function formatDisplayDate(dateStr?: string | null): string {
+    if (!dateStr) return '';
+    try {
+      const d = new Date(dateStr);
+      return d.toLocaleDateString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch {
+      return dateStr;
+    }
+  }
+
   let canSubmit = $derived(
     Boolean(
       selectedVideo &&
@@ -237,7 +364,8 @@
       captionOk &&
       !publishingStore.isPublishing &&
       !isJobInFlight &&
-      !isPublished
+      !isPublished &&
+      !isVideoPublished(selectedVideo)
     )
   );
 </script>
@@ -325,19 +453,19 @@
         <div class="space-y-2.5 max-h-[620px] overflow-y-auto pr-1">
           {#each videos as video}
             <div
-              class="w-full text-left p-3 rounded-xl border transition-all relative group {selectedVideo?.id === video.id ? 'border-primary bg-primary/10 ring-1 ring-primary/40 shadow-sm' : video.can_publish ? 'border-surface-border hover:border-zinc-500 bg-surface-elevated/40' : 'border-surface-border/40 bg-surface-elevated/10 opacity-60'}"
+              class="w-full text-left p-3 rounded-xl border transition-all relative group {selectedVideo?.id === video.id ? 'border-primary bg-primary/10 ring-1 ring-primary/40 shadow-sm' : isVideoPublished(video) ? 'border-emerald-800/40 hover:border-emerald-700 bg-surface-elevated/40' : video.can_publish ? 'border-surface-border hover:border-zinc-500 bg-surface-elevated/40' : 'border-surface-border/40 bg-surface-elevated/10 opacity-60'}"
             >
               <div
                 class="flex items-start gap-3 cursor-pointer"
-                onclick={() => { if (video.can_publish) selectedVideo = video; }}
+                onclick={() => { selectedVideo = video; }}
                 role="button"
                 tabindex="0"
-                onkeydown={(e) => { if (e.key === 'Enter' && video.can_publish) selectedVideo = video; }}
+                onkeydown={(e) => { if (e.key === 'Enter') selectedVideo = video; }}
               >
                 <!-- Thumbnail -->
                 <div class="relative w-16 h-12 flex-shrink-0 rounded-lg overflow-hidden bg-surface-elevated border border-surface-border">
                   {#if video.thumbnail_url}
-                    <img src={video.thumbnail_url} alt={video.title} class="w-full h-full object-cover {video.can_publish ? '' : 'grayscale'}"/>
+                    <img src={video.thumbnail_url} alt={video.title} class="w-full h-full object-cover {video.can_publish || isVideoPublished(video) ? '' : 'grayscale'}"/>
                   {:else}
                     <div class="w-full h-full flex items-center justify-center text-lg">🎬</div>
                   {/if}
@@ -350,7 +478,7 @@
 
                 <!-- Info -->
                 <div class="flex-1 min-w-0 pr-6">
-                  <p class="text-xs font-semibold leading-tight line-clamp-2 {video.can_publish ? 'text-white' : 'text-zinc-400'}">
+                  <p class="text-xs font-semibold leading-tight line-clamp-2 {video.can_publish || isVideoPublished(video) ? 'text-white' : 'text-zinc-400'}">
                     {video.title}
                   </p>
 
@@ -366,10 +494,10 @@
                       </span>
                     {/if}
 
-                    {#if video.is_already_published}
-                      <span class="badge text-[9px] bg-zinc-800 text-zinc-400 border border-zinc-700">✓ Published</span>
-                    {:else if video.is_publishing_in_progress}
-                      <span class="badge text-[9px] bg-blue-950 text-blue-400 border border-blue-800 animate-pulse">⏳ In Progress</span>
+                    {#if isVideoPublished(video)}
+                      <span class="badge text-[9px] badge-published font-semibold">✓ Published</span>
+                    {:else if isVideoInProgress(video)}
+                      <span class="badge text-[9px] bg-blue-950 text-blue-400 border border-blue-800 animate-pulse font-semibold">⏳ In Progress</span>
                     {/if}
                   </div>
 
@@ -531,13 +659,32 @@
             <!-- Specifications & Aspect Ratio Details -->
             <div class="sm:col-span-7 space-y-3 text-xs">
               <div>
-                <span class="text-[10px] text-zinc-500 uppercase tracking-wider block">Selected Video Title</span>
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-[10px] text-zinc-500 uppercase tracking-wider block">Selected Video Title</span>
+                  {#if isVideoPublished(selectedVideo)}
+                    <span class="badge badge-published text-[10px] font-semibold">✓ Published Live</span>
+                  {:else if isVideoInProgress(selectedVideo)}
+                    <span class="badge text-[10px] bg-blue-950 text-blue-400 border border-blue-800 animate-pulse font-semibold">⏳ In Progress</span>
+                  {:else}
+                    <span class="badge badge-ready text-[10px] font-semibold">Ready to Publish</span>
+                  {/if}
+                </div>
                 <p class="text-sm font-semibold text-white mt-0.5 leading-snug">{selectedVideo.title}</p>
                 <p class="text-[11px] text-zinc-400 mt-0.5">Channel: {selectedVideo.channel_name || 'Adoraxe Demo Lab'}</p>
               </div>
 
               <!-- Conversion Filter Breakdown -->
               <div class="p-3 rounded-xl bg-surface-elevated border border-surface-border space-y-1.5">
+                <div class="flex items-center justify-between">
+                  <span class="text-zinc-400 font-medium">Publishing Status:</span>
+                  {#if isVideoPublished(selectedVideo)}
+                    <span class="badge badge-published text-[10px] font-semibold">✓ Published</span>
+                  {:else if isVideoInProgress(selectedVideo)}
+                    <span class="badge text-[10px] bg-blue-950 text-blue-400 border border-blue-800 animate-pulse font-semibold">⏳ In Progress</span>
+                  {:else}
+                    <span class="badge badge-ready text-[10px] font-semibold">Ready to Publish</span>
+                  {/if}
+                </div>
                 <div class="flex items-center justify-between">
                   <span class="text-zinc-400 font-medium">Aspect Ratio Filter:</span>
                   <span class="font-bold text-white">{formatCropMode(selectedVideo.crop_mode)}</span>
@@ -552,78 +699,187 @@
                 </div>
                 <div class="flex items-center justify-between">
                   <span class="text-zinc-400 font-medium">Cloudinary Delivery:</span>
-                  <span class="text-emerald-400 font-mono text-[11px]">HTTPS Verified ✓</span>
+                  {#if selectedVideo.cloudinary_url && selectedVideo.cloudinary_url.startsWith('https://')}
+                    <span class="text-emerald-400 font-mono text-[11px]">HTTPS Verified ✓</span>
+                  {:else}
+                    <span class="text-amber-400 font-mono text-[11px]">Local File Only ⚠</span>
+                  {/if}
                 </div>
               </div>
 
-              <div class="p-2.5 rounded-lg bg-emerald-950/30 border border-emerald-800/40 text-[11px] text-emerald-300 flex items-start gap-2">
-                <span>✓</span>
-                <p>Validated against official Instagram Reel technical constraints (1080×1920, H.264 / AAC, 30fps).</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 3. CAPTION EDITOR CARD (Persisted across navigation) -->
-        <div class="card">
-          <div class="flex items-center justify-between mb-2">
-            <h2 class="text-sm font-semibold text-zinc-200 font-headline">Instagram Reel Caption</h2>
-            {#if publishingStore.activeJob?.caption}
-              <span class="text-[10px] text-emerald-400 font-medium">✓ Saved in Database</span>
-            {/if}
-          </div>
-          <div class="relative">
-            <textarea
-              bind:value={publishingStore.caption}
-              placeholder="Write your Instagram Reel caption, hashtags, and description…"
-              rows={4}
-              class="input resize-none w-full font-body text-xs"
-              disabled={isJobInFlight || isPublished}
-            ></textarea>
-            <span class="absolute bottom-2 right-2 text-[10px] {captionOk ? 'text-zinc-500' : 'text-red-400 font-bold'}">
-              {captionLength}/2200
-            </span>
-          </div>
-        </div>
-
-        <!-- 4. RIGHTS CONFIRMATION & PUBLISH ACTION -->
-        <div class="card space-y-4">
-          <label class="flex items-start gap-3 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              bind:checked={rightsConfirmed}
-              disabled={isJobInFlight || isPublished}
-              class="mt-0.5 accent-primary h-4 w-4 rounded"
-            />
-            <div class="text-xs text-zinc-300 leading-relaxed">
-              <strong class="text-white">I confirm publishing rights:</strong> I have all necessary rights, licenses,
-              and permissions to publish this video content to Instagram.
-              {#if isDemoMode}
-                <span class="text-amber-400 block mt-0.5 font-medium">(DEMO MODE active: Publication will be simulated and recorded.)</span>
+              {#if isVideoPublished(selectedVideo)}
+                <div class="p-2.5 rounded-lg bg-emerald-950/30 border border-emerald-800/40 text-[11px] text-emerald-300 flex items-start gap-2">
+                  <span>✓</span>
+                  <p>This Reel has been successfully published to Instagram (@{currentAccount?.username || igStatus?.username}). Duplicate publishing is prevented.</p>
+                </div>
+              {:else}
+                <div class="p-2.5 rounded-lg bg-emerald-950/30 border border-emerald-800/40 text-[11px] text-emerald-300 flex items-start gap-2">
+                  <span>✓</span>
+                  <p>Validated against official Instagram Reel technical constraints (1080×1920, H.264 / AAC, 30fps).</p>
+                </div>
               {/if}
             </div>
-          </label>
-
-          <button
-            class="btn-primary w-full justify-center py-3 text-sm font-bold shadow-md shadow-primary/20"
-            onclick={handlePublish}
-            disabled={!canSubmit}
-          >
-            {#if publishingStore.isPublishing}
-              ⏳ Submitting Job to Server…
-            {:else if isJobInFlight}
-              ⏳ In Progress ({activeJob?.current_stage || activeJob?.status || 'Processing'})…
-            {:else if isPublished}
-              ✓ Published Live to @{currentAccount?.username || igStatus?.username}
-            {:else if !selectedVideo.can_publish}
-              ⚠ Cannot Publish ({selectedVideo.disabled_reason || 'Ineligible'})
-            {:else if isDemoMode}
-              🔵 Publish Reel to @{currentAccount?.username || igStatus?.username || 'adoraxe_demo'} (SIMULATED)
-            {:else}
-              🚀 Publish Reel to @{currentAccount?.username || igStatus?.username}
-            {/if}
-          </button>
+          </div>
         </div>
+
+        <!-- 3. CAPTION: Display Published Caption if Published, else Edit Caption -->
+        {#if isVideoPublished(selectedVideo)}
+          <div class="card border border-emerald-800/40 bg-emerald-950/10 space-y-3">
+            <div class="flex items-center justify-between pb-2 border-b border-surface-border">
+              <div class="flex items-center gap-2">
+                <span class="text-base">📝</span>
+                <h2 class="text-sm font-bold text-white font-headline">Published Instagram Caption</h2>
+              </div>
+              <span class="badge badge-published text-[10px] font-semibold">✓ Live on Instagram</span>
+            </div>
+
+            {#if getPublishedCaption(selectedVideo)}
+              <div class="p-3.5 rounded-xl bg-surface-elevated/70 border border-surface-border text-xs text-zinc-200 whitespace-pre-wrap leading-relaxed font-body max-h-52 overflow-y-auto selection:bg-emerald-800">
+                {getPublishedCaption(selectedVideo)}
+              </div>
+            {:else}
+              <div class="p-3 rounded-lg bg-surface-elevated/40 border border-surface-border text-xs text-zinc-400 italic">
+                Caption published to Instagram with official Reel tags and metadata.
+              </div>
+            {/if}
+          </div>
+        {:else}
+          <!-- 3. CAPTION EDITOR CARD (For drafting unpublished videos) -->
+          <div class="card">
+            <div class="flex items-center justify-between mb-2">
+              <h2 class="text-sm font-semibold text-zinc-200 font-headline">Instagram Reel Caption</h2>
+              {#if publishingStore.activeJob?.caption}
+                <span class="text-[10px] text-emerald-400 font-medium">✓ Saved in Database</span>
+              {/if}
+            </div>
+            <div class="relative">
+              <textarea
+                bind:value={publishingStore.caption}
+                placeholder="Write your Instagram Reel caption, hashtags, and description…"
+                rows={4}
+                class="input resize-none w-full font-body text-xs"
+                disabled={isJobInFlight}
+              ></textarea>
+              <span class="absolute bottom-2 right-2 text-[10px] {captionOk ? 'text-zinc-500' : 'text-red-400 font-bold'}">
+                {captionLength}/2200
+              </span>
+            </div>
+          </div>
+        {/if}
+
+        <!-- 4. ACTION: If published, show direct Reel redirect link; else show rights check & publish button -->
+        {#if isVideoPublished(selectedVideo)}
+          <div class="card border border-emerald-800/60 bg-gradient-to-r from-emerald-950/40 via-surface-card to-emerald-950/20 p-5 space-y-4 shadow-lg shadow-emerald-950/30">
+            <div class="flex items-center justify-between flex-wrap gap-3">
+              <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-full bg-emerald-500/20 border border-emerald-500/50 flex items-center justify-center text-emerald-400 font-bold text-base shadow-sm flex-shrink-0">
+                  ✓
+                </div>
+                <div>
+                  <h3 class="text-sm font-bold text-white font-headline">This Reel is Published and Live!</h3>
+                  <p class="text-xs text-zinc-400 mt-0.5">
+                    Live on Instagram: <strong class="text-emerald-400">@{currentAccount?.username || igStatus?.username || 'yotube_insta_automation'}</strong>
+                    {#if getPublishedDate(selectedVideo)}
+                      • {formatDisplayDate(getPublishedDate(selectedVideo))}
+                    {/if}
+                  </p>
+                </div>
+              </div>
+              {#if getMediaId(selectedVideo)}
+                <span class="text-[11px] font-mono text-emerald-300 bg-emerald-950/60 px-2.5 py-1 rounded-lg border border-emerald-800/60">
+                  Media ID: {getMediaId(selectedVideo)}
+                </span>
+              {/if}
+            </div>
+
+            <!-- REDIRECT BUTTON TO INSTAGRAM REEL -->
+            <div class="flex items-center gap-3 pt-1">
+              <a
+                href={getReelUrl(selectedVideo)}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn-primary flex-1 justify-center py-3 text-sm font-bold shadow-md shadow-emerald-950/50 bg-gradient-to-r from-pink-600 via-rose-600 to-purple-600 hover:from-pink-500 hover:via-rose-500 hover:to-purple-500 text-white flex items-center gap-2 border border-pink-400/40 transition-all hover:scale-[1.01]"
+              >
+                <span>📸</span>
+                <span>Open Reel on Instagram</span>
+                <span class="text-xs font-mono">↗</span>
+              </a>
+
+              <a
+                href="/history"
+                class="btn-secondary py-3 px-4 text-xs font-semibold flex items-center gap-1.5 hover:border-zinc-500 transition-colors"
+                title="View full publishing history and audit logs"
+              >
+                <span>📜</span> View History
+              </a>
+            </div>
+          </div>
+        {:else}
+          <!-- 4. RIGHTS CONFIRMATION & PUBLISH ACTION (For unpublished videos) -->
+          <div class="card space-y-4">
+            <label class="flex items-start gap-3 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                bind:checked={rightsConfirmed}
+                disabled={isJobInFlight}
+                class="mt-0.5 accent-primary h-4 w-4 rounded"
+              />
+              <div class="text-xs text-zinc-300 leading-relaxed">
+                <strong class="text-white">I confirm publishing rights:</strong> I have all necessary rights, licenses,
+                and permissions to publish this video content to Instagram.
+                {#if isDemoMode}
+                  <span class="text-amber-400 block mt-0.5 font-medium">(DEMO MODE active: Publication will be simulated and recorded.)</span>
+                {/if}
+              </div>
+            </label>
+
+            <button
+              class="btn-primary w-full justify-center py-3 text-sm font-bold shadow-md shadow-primary/20"
+              onclick={handlePublish}
+              disabled={!canSubmit}
+            >
+              {#if publishingStore.isPublishing}
+                ⏳ Submitting Job to Server…
+              {:else if isJobInFlight}
+                ⏳ In Progress ({activeJob?.current_stage || activeJob?.status || 'Processing'})…
+              {:else if !selectedVideo.can_publish}
+                ⚠ Cannot Publish ({selectedVideo.disabled_reason || 'Ineligible'})
+              {:else if isDemoMode}
+                🔵 Publish Reel to @{currentAccount?.username || igStatus?.username || 'adoraxe_demo'} (SIMULATED)
+              {:else}
+                🚀 Publish Reel to @{currentAccount?.username || igStatus?.username}
+              {/if}
+            </button>
+
+            {#if !selectedVideo.can_publish && selectedVideo.disabled_reason?.includes('Cloudinary HTTPS URL')}
+              <div class="p-3 rounded-lg bg-amber-950/40 border border-amber-800/60 text-xs text-amber-200 space-y-2">
+                <p class="leading-relaxed">
+                  <strong>Cloud CDN Delivery Required for Instagram:</strong> Instagram's API fetches videos directly via public HTTPS URLs. This Reel was saved locally because the original file exceeded Cloudinary's free-tier size limit.
+                </p>
+                <a
+                  href="/library/{selectedVideo.id}"
+                  class="btn-secondary text-xs w-full py-2 flex items-center justify-center gap-1.5 font-medium hover:border-amber-500 text-white"
+                >
+                  <span>⚡</span> Re-Process Video with Adaptive Cloud CDN Encoding
+                </a>
+              </div>
+            {/if}
+
+            {#if !selectedVideo.can_publish && selectedVideo.disabled_reason?.includes('15-minute')}
+              <div class="p-3 rounded-lg bg-amber-950/40 border border-amber-800/60 text-xs text-amber-200 space-y-2">
+                <p class="leading-relaxed">
+                  <strong>Meta Reel Limit (15 Minutes Max):</strong> Meta's Instagram Graph API strictly limits Reels to a maximum duration of 15 minutes (900 seconds). This video is {selectedVideo.duration_seconds}s long. Re-processing will automatically trim the Reel to Meta's 15-minute ceiling so it can be published without timing out or being rejected.
+                </p>
+                <a
+                  href="/library/{selectedVideo.id}"
+                  class="btn-secondary text-xs w-full py-2 flex items-center justify-center gap-1.5 font-medium hover:border-amber-500 text-white"
+                >
+                  <span>⚡</span> Re-Process in Video Library (Auto-Trim to 15:00)
+                </a>
+              </div>
+            {/if}
+          </div>
+        {/if}
 
         <!-- 5. PERSISTENT JOB STATUS (Survives tab/page navigation & refresh) -->
         {#if activeJob}
@@ -665,9 +921,9 @@
                 </div>
 
                 <div class="flex items-center justify-between gap-3 pt-1 flex-wrap">
-                  {#if activeJob.permalink}
+                  {#if activeJob.permalink || getReelUrl(selectedVideo)}
                     <a
-                      href={activeJob.permalink}
+                      href={activeJob.permalink || getReelUrl(selectedVideo)}
                       target="_blank"
                       rel="noopener noreferrer"
                       class="btn-primary text-xs py-1.5 px-3 flex items-center gap-1 bg-gradient-to-r from-pink-600 to-purple-600 hover:from-pink-500 hover:to-purple-500"

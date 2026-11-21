@@ -37,6 +37,30 @@ def test_validate_for_reel_specs():
     assert is_ok
     assert reason == "OK"
 
+    # Valid output reel (within 900s)
+    is_ok_out, reason_out = validate_for_reel(valid_probe, is_output_reel=True)
+    assert is_ok_out
+    assert reason_out == "OK"
+
+    # Too long output reel (> 900s)
+    long_probe = VideoProbeResult(
+        duration_seconds=914.0,
+        width=1080,
+        height=1920,
+        codec="h264",
+        fps=30.0,
+        file_size_bytes=50 * 1024 * 1024,
+        has_audio=True,
+        audio_codec="aac",
+        is_valid=True,
+    )
+    is_ok_long_orig, _ = validate_for_reel(long_probe, is_output_reel=False)
+    assert is_ok_long_orig is True  # Original video can be trimmed
+
+    is_ok_long_out, reason_long_out = validate_for_reel(long_probe, is_output_reel=True)
+    assert is_ok_long_out is False
+    assert "too long" in reason_long_out.lower()
+
     # Too short
     short_probe = VideoProbeResult(
         duration_seconds=1.5,

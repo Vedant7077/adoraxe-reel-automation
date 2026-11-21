@@ -1,6 +1,6 @@
 # Adoraxe – YouTube to Instagram Reel Automation Portal
 
-[![Backend Tests](https://img.shields.io/badge/pytest-153%20passed%2C%201%20skipped-brightgreen.svg)]()
+[![Backend Tests](https://img.shields.io/badge/pytest-187%20passed%2C%201%20skipped-brightgreen.svg)]()
 [![Frontend Build](https://img.shields.io/badge/sveltekit-passing-blue.svg)]()
 [![Graph API](https://img.shields.io/badge/Meta%20Graph%20API-v26.0%20Unified%20Login-purple.svg)]()
 [![FFmpeg](https://img.shields.io/badge/FFmpeg-9.0.2%20Reel%20Transcoding-orange.svg)]()
@@ -44,18 +44,20 @@ Adoraxe solves this by unifying video ingestion, automated 9:16 transcoding, clo
 ## Key Features
 
 * **YouTube Channel Ingestion**: Ingests YouTube channel catalogs via handle or URL with subscriber statistics, view counts, upload dates, and video metadata.
-* **Intelligent 9:16 Transcoding**: Built-in FFmpeg 9.0.2 processing supporting three conversion modes:
+* **Intelligent 9:16 Transcoding & Live Progress**: Built-in FFmpeg 9.0.2 processing supporting three conversion modes with real-time percentage progress streaming to the browser:
   * **Crop (Center)**: Automatically crops horizontally to 9:16 without distortion.
   * **Pad (Bars)**: Preserves original aspect ratio with vertical letterboxing.
   * **Blur Fill**: Fills vertical letterbox margins with a blurred, scaled background copy of the video.
-* **Strict Technical Reel Compliance**: Enforces 1080×1920 resolution, H.264 video codec, AAC stereo audio (48 kHz), 30 fps, and under 60-second duration limits.
-* **Cloudinary CDN Staging**: Automatically stages transcoded media to Cloudinary, ensuring signed, byte-range compliant HTTPS URLs required by Meta media containers.
+* **Strict Technical Reel Compliance & Duration Trimming**: Enforces 1080×1920 resolution, H.264 video codec, AAC stereo audio, 30 fps, Cloudinary 100MB adaptive bitrate scaling, and automated 15-minute (900-second) Meta Reels Graph API ceiling trimming (`-t 900`).
+* **Cloudinary CDN Staging & Instant Verification**: Automatically stages transcoded media to Cloudinary, ensuring signed, byte-range compliant HTTPS URLs required by Meta media containers with zero-latency streaming delivery checks.
 * **Meta Unified Login (Facebook Login for Business)**: Secure OAuth connection supporting System-User Access Tokens (SUAT), non-expiring credentials, and automated assigned Instagram account discovery.
 * **Encrypted Credential Storage**: Symmetric Fernet encryption for all Instagram OAuth access tokens stored in PostgreSQL. Tokens are never exposed in plaintext.
 * **Persistent Publishing State Machine**: 8-stage lifecycle tracked in PostgreSQL (`QUEUED` → `CONTAINER_CREATING` → `CONTAINER_PROCESSING` → `READY_TO_PUBLISH` → `PUBLISH_REQUESTED` → `PUBLISHED`).
+* **Extended Meta Container Tolerance**: 10-minute (120 attempts) polling tolerance with real-time heartbeat progress for large video transcodes on Meta's servers, capturing transparent error subcodes without timeouts.
 * **Strict Idempotency & Duplicate Prevention**: Cryptographically derived idempotency keys (`pub_{account_id}_{video_id}_{caption_hash}`) block accidental re-posts.
 * **Resilient Timeout Handling & Reconciliation**: Network timeouts during publishing transition jobs to `OUTCOME_UNKNOWN` without triggering destructive automatic retries. Safe read-only reconciliation queries Meta Graph API to verify publication.
 * **Non-Blocking Decoupled Architecture**: Background publishing execution persists and continues seamlessly even if the user navigates between pages or refreshes the browser.
+* **Single Environment Configuration**: Consolidated root `.env` architecture for frontend and backend with fail-closed production security checks.
 
 ---
 

@@ -5,9 +5,17 @@
  */
 import { verifyAdminAuth } from '#lib/api/client';
 
+function checkIsLocal(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || import.meta.env.DEV;
+}
+
 class AuthStore {
-  isAuthenticated = $state(false);
-  isChecking = $state(true);
+  // On localhost / development, default to authenticated immediately with zero spinner delay.
+  // In production / remote deployment, start in checking mode to protect public access.
+  isAuthenticated = $state(typeof window !== 'undefined' ? checkIsLocal() : false);
+  isChecking = $state(typeof window !== 'undefined' ? !checkIsLocal() : true);
   loginError = $state('');
 
   constructor() {
@@ -24,17 +32,27 @@ class AuthStore {
       return;
     }
 
-    try {
-      const savedKey = sessionStorage.getItem('adoraxe_admin_key');
-      if (!savedKey) {
-        // Test if the backend requires authentication (dev mode might be open)
-        const works = await verifyAdminAuth('');
-        if (works) {
-          // Backend has auth disabled (local development mode)
-          this.isAuthenticated = true;
-        } else {
+    const isLocal = checkIsLocal();
+    const savedKey = sessionStorage.getItem('adoraxe_admin_key');
+
+    // On localhost, if no key is saved and dev mode is active, authenticate immediately without blocking UI
+    if (isLocal && !savedKey) {
+      this.isAuthenticated = true;
+      this.isChecking = false;
+      // Non-blocking background verification: if backend has AUTH_ENABLED=true even locally, handle it
+      verifyAdminAuth('').then((works) => {
+        if (!works) {
           this.isAuthenticated = false;
         }
+      }).catch(() => {});
+      return;
+    }
+
+    // In production or when a saved key exists, perform verification
+    try {
+      if (!savedKey) {
+        const works = await verifyAdminAuth('');
+        this.isAuthenticated = works;
       } else {
         const valid = await verifyAdminAuth(savedKey);
         if (valid) {

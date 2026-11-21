@@ -11,7 +11,9 @@ from pydantic import field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-ENV_FILE_PATH = str(PROJECT_ROOT / ".env")
+ROOT_ENV = PROJECT_ROOT / ".env"
+BACKEND_ENV = BACKEND_ROOT / ".env"
+ENV_FILE_PATH = str(ROOT_ENV if ROOT_ENV.exists() else (BACKEND_ENV if BACKEND_ENV.exists() else ".env"))
 DEFAULT_TEMP_DIR = str(BACKEND_ROOT / "temp")
 
 

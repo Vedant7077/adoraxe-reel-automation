@@ -31,7 +31,7 @@ class InstagramPublisher:
     """
 
     GRAPH_API_BASE = "https://graph.facebook.com"
-    MAX_POLL_ATTEMPTS = 30
+    MAX_POLL_ATTEMPTS = 120  # 120 attempts x 5s = 600s (10 mins) tolerance for large Meta video transcodes
     POLL_INTERVAL_SECONDS = 5
     HTTP_TIMEOUT_SECONDS = 60.0
 
@@ -144,7 +144,7 @@ class InstagramPublisher:
             # Stage 3: Poll until ready
             is_ready = await self._poll_until_ready(container_id, access_token, job_id, job_repo)
             if not is_ready:
-                err_msg = "Instagram media container processing timed out or failed on Meta's servers."
+                err_msg = getattr(self, "_last_poll_error", None) or "Instagram media container processing timed out or failed on Meta's servers."
                 job_repo.update_status(job_id, JobStatus.FAILED.value, error=err_msg)
                 history_repo.create_entry_failed(job_id, err_msg)
                 return
@@ -391,11 +391,12 @@ class InstagramPublisher:
 
     async def _poll_until_ready(self, container_id: str, access_token: str, job_id: str, job_repo: JobRepository) -> bool:
         """Poll the container status until FINISHED or failure, updating progress incrementally."""
-        progress_steps = [35, 45, 55, 65, 75]
+        self._last_poll_error = None
         for attempt in range(self.MAX_POLL_ATTEMPTS):
             await asyncio.sleep(self.POLL_INTERVAL_SECONDS)
-            step_idx = min(attempt, len(progress_steps) - 1)
-            current_progress = progress_steps[step_idx]
+            progress_pct = min(78, 30 + int(((attempt + 1) / self.MAX_POLL_ATTEMPTS) * 48))
+            elapsed_sec = (attempt + 1) * int(self.POLL_INTERVAL_SECONDS)
+            stage_msg = f"Meta is processing Reel media container ({elapsed_sec}s elapsed)..."
 
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
@@ -406,21 +407,37 @@ class InstagramPublisher:
                     if resp.status_code == 200:
                         data = resp.json()
                         status_code = data.get("status_code")
+                        status_detail = data.get("status")
                         if status_code == "FINISHED":
+                            self._last_poll_error = None
                             return True
                         if status_code in ("ERROR", "EXPIRED"):
-                            logger.error("Instagram container %s failed with status_code: %s", container_id, status_code)
+                            detail = status_detail or data.get("error_message") or f"Container status: {status_code}"
+                            logger.error("Instagram container %s failed with status_code: %s (%s)", container_id, status_code, detail)
+                            self._last_poll_error = f"Instagram media container failed ({status_code}): {detail}"
                             return False
 
                         job_repo.update_status(
                             job_id,
                             JobStatus.CONTAINER_PROCESSING.value,
-                            progress=current_progress,
-                            current_stage="CONTAINER_PROCESSING",
+                            progress=progress_pct,
+                            current_stage=stage_msg,
                         )
+                    else:
+                        err_text = resp.text
+                        try:
+                            err_json = resp.json()
+                            if "error" in err_json and "message" in err_json["error"]:
+                                err_text = err_json["error"]["message"]
+                        except Exception:
+                            pass
+                        logger.warning("Meta API returned %d while polling container %s: %s", resp.status_code, container_id, err_text)
             except Exception as e:
-                logger.warning("Transient error polling container %s: %s", container_id, e)
+                logger.warning("Transient error polling container %s (attempt %d/%d): %s", container_id, attempt + 1, self.MAX_POLL_ATTEMPTS, e)
 
+        timeout_msg = f"Instagram media container processing timed out after {int(self.MAX_POLL_ATTEMPTS * self.POLL_INTERVAL_SECONDS)}s on Meta's servers."
+        logger.error(timeout_msg)
+        self._last_poll_error = timeout_msg
         return False
 
     async def _run_simulated_publish(self, job_id: str, job_repo: JobRepository, history_repo: HistoryRepository, db: Session):

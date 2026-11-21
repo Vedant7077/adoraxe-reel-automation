@@ -150,6 +150,36 @@ async def test_4_container_polling_progress(db_session, test_setup):
         assert ready is True
 
 
+# 4b. Container polling error extraction from Meta
+@pytest.mark.asyncio
+async def test_4b_container_polling_error_extraction(db_session, test_setup):
+    repo = JobRepository(db_session)
+    job = repo.create_publish_job(
+        video_id=test_setup["video"].id,
+        instagram_account_id=test_setup["account"].id,
+        caption="Polling Error Test",
+        is_demo=False,
+    )
+    repo.update_container_id(job.id, "container_err")
+
+    publisher = InstagramPublisher()
+    publisher.MAX_POLL_ATTEMPTS = 2
+    publisher.POLL_INTERVAL_SECONDS = 0.01
+
+    responses = [
+        httpx.Response(200, json={"status_code": "ERROR", "status": "Video duration exceeds maximum allowed length for Reels (900 seconds)"}),
+    ]
+
+    mock_client = AsyncMock()
+    mock_client.get.side_effect = responses
+    mock_client.__aenter__.return_value = mock_client
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        ready = await publisher._poll_until_ready("container_err", "fake_token", job.id, repo)
+        assert ready is False
+        assert "Video duration exceeds maximum allowed length" in publisher._last_poll_error
+
+
 # 5. media_publish success returning media ID
 # 6. Successful publication persistence
 @pytest.mark.asyncio
